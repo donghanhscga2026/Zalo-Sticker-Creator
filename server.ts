@@ -126,7 +126,15 @@ async function generateOne(source: { mimeType: string; data: string }, pose: typ
   const findImageRef = (value: any): string | null => {
     if (!value) return null;
     if (typeof value === "string") {
-      return /(?:^https?:\\/\\/|\\.(?:png|jpe?g|webp)(?:$|\\?))/i.test(value) ? value : null;
+      const lower = value.toLowerCase();
+      return value.startsWith("http://") ||
+        value.startsWith("https://") ||
+        lower.includes(".png") ||
+        lower.includes(".jpg") ||
+        lower.includes(".jpeg") ||
+        lower.includes(".webp")
+        ? value
+        : null;
     }
     if (Array.isArray(value)) {
       for (const item of value) {
