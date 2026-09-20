@@ -8,7 +8,7 @@ const PORT = Number(process.env.PORT) || 3000;
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
-const CLOUDFLARE_MODEL = "@cf/stabilityai/stable-diffusion-xl-base-1.0";
+const CLOUDFLARE_MODEL = "@cf/black-forest-labs/flux-2-klein-4b";
 
 function getCloudflareConfig() {
   const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
@@ -45,40 +45,38 @@ function parseDataUrl(dataUrl: string) {
 
 async function generateOne(source: { mimeType: string; data: string }, pose: typeof STICKER_POSES[number], index: number) {
   const { accountId, apiToken } = getCloudflareConfig();
-  const prompt = `Photorealistic messaging sticker of the SAME recognizable person in the reference image. Preserve face, facial proportions, skin tone, hairstyle/hairline and clothing from the uploaded photo. ${pose.prompt}. Upper-body composition, natural hands and anatomy, clean white background, thick white die-cut sticker outline, subtle shadow, centered square composition. No circular frame, no caption pill, no extra text unless explicitly requested.`;
+  const prompt = `Create ONE square photorealistic messaging sticker by EDITING input_image_0. Keep the SAME recognizable person and preserve identity, face shape, eyes, eyebrows, nose, mouth, skin tone, hairstyle/hairline and the same clothing from the reference. Change only the expression/pose as requested: ${pose.prompt}. Upper-body framing, natural anatomy and hands, clean white background, thick white die-cut outline, subtle shadow, centered composition. No circular frame, no caption pill, no extra text unless explicitly requested.`;
+
+  // FLUX.2 Klein image editing uses multipart input. The reference image field
+  // must be named input_image_0 rather than sent as JSON image_b64.
+  const form = new FormData();
+  form.append("prompt", prompt);
+  const imageBytes = Buffer.from(source.data, "base64");
+  form.append("input_image_0", new Blob([imageBytes], { type: source.mimeType }), "reference.jpg");
+  form.append("width", "1024");
+  form.append("height", "1024");
 
   const response = await fetch(
     `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${CLOUDFLARE_MODEL}`,
     {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        prompt,
-        image_b64: source.data,
-        strength: 0.45,
-        guidance: 7.5,
-        num_steps: 20,
-        width: 1024,
-        height: 1024,
-      }),
+      headers: { Authorization: `Bearer ${apiToken}` },
+      body: form,
     },
   );
 
   if (!response.ok) {
     const detail = await response.text();
-    const error: any = new Error(`Cloudflare Workers AI HTTP ${response.status}: ${detail.slice(0, 500)}`);
+    const error: any = new Error(`Cloudflare Workers AI HTTP ${response.status}: ${detail.slice(0, 700)}`);
     error.status = response.status;
     throw error;
   }
 
-  const contentType = response.headers.get("content-type") || "image/png";
+  const contentType = response.headers.get("content-type") || "application/json";
   if (contentType.includes("application/json")) {
     const data: any = await response.json();
-    const b64 = data?.result?.image || data?.result?.image_b64;
-    if (!b64) throw new Error("Cloudflare Workers AI không trả về dữ liệu ảnh.");
+    const b64 = data?.result?.image || data?.result?.image_b64 || data?.image;
+    if (!b64) throw new Error("Cloudflare FLUX.2 không trả về dữ liệu ảnh.");
     return { id: `sticker_${index + 1}`, title: pose.name, imageUrl: `data:image/png;base64,${b64}`, caption: pose.caption };
   }
 
@@ -103,7 +101,7 @@ app.post("/api/generate-stickers", async (req, res) => {
       return res.status(503).json({ error: "Chưa cấu hình CLOUDFLARE_ACCOUNT_ID và CLOUDFLARE_API_TOKEN trong AI Studio Secrets." });
     }
 
-    const numStickers = Math.min(Math.max(Number(count) || 12, 9), 15);
+    const numStickers = Math.min(Math.max(Number(count) || 12, 1), 15);
     const poses = STICKER_POSES.slice(0, numStickers);
     const source = parseDataUrl(image);
     const results = new Array<any>(poses.length);
@@ -118,7 +116,7 @@ app.post("/api/generate-stickers", async (req, res) => {
           results[index] = await generateOne(source, poses[index], index);
         } catch (err: any) {
           console.error(`Sticker ${index + 1} failed:`, err?.message || err);
-          if (err?.status === 401 || err?.status === 403 || err?.status === 429) {
+          if (err?.status === 400 || err?.status === 401 || err?.status === 403 || err?.status === 429) {
             fatalError = err;
             return;
           }
@@ -135,7 +133,7 @@ app.post("/api/generate-stickers", async (req, res) => {
       return res.status(status).json({
         error: fatalError?.status === 429
           ? "Cloudflare Workers AI đã chạm giới hạn miễn phí hiện tại. Hãy thử lại sau khi quota được làm mới."
-          : "Cloudflare Workers AI từ chối yêu cầu. Hãy kiểm tra Account ID và API Token trong Secrets.",
+          : `Cloudflare Workers AI không chấp nhận yêu cầu: ${fatalError?.message || "kiểm tra model, Account ID và API Token."}`,
         code: fatalError?.status === 429 ? "CLOUDFLARE_QUOTA_EXCEEDED" : "CLOUDFLARE_AUTH_ERROR",
       });
     }
