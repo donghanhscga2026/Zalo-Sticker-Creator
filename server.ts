@@ -82,14 +82,13 @@ async function generateOne(source: { mimeType: string; data: string }, pose: typ
         null,
         prompt,
         negativePrompt,
-        "(No style)",
+        "Spring Festival",
         20,
-        1.0,
-        1.0,
-        0.4,
+        1.1,
+        1.1,
         0.0,
         0.0,
-        ["pose"],
+        [],
         4.5,
         42 + index,
         "EulerDiscreteScheduler",
@@ -121,9 +120,41 @@ async function generateOne(source: { mimeType: string; data: string }, pose: typ
   const dataLines = eventText.split("\n").filter(line => line.startsWith("data: "));
   if (!dataLines.length) throw new Error(`InstantID không trả về ảnh: ${eventText.slice(-700)}`);
   const payload: any = JSON.parse(dataLines[dataLines.length - 1].slice(6));
-  const first = Array.isArray(payload?.[0]) ? payload[0][0] : payload?.[0];
-  const imageUrl = first?.url || first?.path || first;
-  if (typeof imageUrl !== "string") throw new Error("Không đọc được URL ảnh từ InstantID.");
+
+  // Gradio versions can wrap outputs as [FileData, update], {data:[...]},
+  // or nested arrays. Find the first actual image FileData recursively.
+  const findImageRef = (value: any): string | null => {
+    if (!value) return null;
+    if (typeof value === "string") {
+      return /(?:^https?:\\/\\/|\\.(?:png|jpe?g|webp)(?:$|\\?))/i.test(value) ? value : null;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const found = findImageRef(item);
+        if (found) return found;
+      }
+      return null;
+    }
+    if (typeof value === "object") {
+      if (typeof value.url === "string") return value.url;
+      if (typeof value.path === "string") return value.path;
+      if (value.data) {
+        const found = findImageRef(value.data);
+        if (found) return found;
+      }
+      for (const child of Object.values(value)) {
+        const found = findImageRef(child);
+        if (found) return found;
+      }
+    }
+    return null;
+  };
+
+  const imageUrl = findImageRef(payload);
+  if (!imageUrl) {
+    console.error("InstantID raw SSE tail:", eventText.slice(-2000));
+    throw new Error(`Không đọc được URL ảnh từ InstantID. Payload: ${JSON.stringify(payload).slice(0, 700)}`);
+  }
 
   const absoluteUrl = imageUrl.startsWith("http") ? imageUrl : `${INSTANTID_SPACE}/file=${imageUrl}`;
   const imageResponse = await fetch(absoluteUrl, { headers: authHeaders });
