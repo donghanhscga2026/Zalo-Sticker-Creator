@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { Upload, Sparkles, Image as ImageIcon, Check, Sliders, AlertCircle, RefreshCw } from "lucide-react";
 
 interface PhotoUploaderProps {
-  onGenerate: (image: string, count: number, packName: string) => void;
+  onGenerate: (image: string, count: number, packName: string, preset: string) => void;
   isLoading: boolean;
 }
 
@@ -10,7 +10,7 @@ export const PhotoUploader: React.FC<PhotoUploaderProps> = ({ onGenerate, isLoad
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
   const [stickerCount, setStickerCount] = useState<number>(12);
   const [packName, setPackName] = useState<string>("Bộ Sticker Đáng Yêu");
-  const [dragOver, setDragOver] = useState<boolean>(false);
+  const [dragOver, setDragOver] = useState<boolean>(false);\n  const [generationPreset, setGenerationPreset] = useState<string>("instantid_conservative");
   const [error, setError] = useState<string | null>(null);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -53,7 +53,7 @@ export const PhotoUploader: React.FC<PhotoUploaderProps> = ({ onGenerate, isLoad
       setError("Vui lòng tải lên ảnh cá nhân của bạn trước");
       return;
     }
-    onGenerate(selectedImage, stickerCount, packName || "Bộ Sticker Của Tôi");
+    onGenerate(selectedImage, stickerCount, packName || "Bộ Sticker Của Tôi", generationPreset);
   };
 
   // Sample preset demo images if user wants to test quickly
@@ -117,6 +117,20 @@ export const PhotoUploader: React.FC<PhotoUploaderProps> = ({ onGenerate, isLoad
               </span>
             </div>
           </div>
+        </div>
+
+        <div>
+          <label className="block text-sm font-semibold text-slate-700 mb-2">Chế độ giữ khuôn mặt / AI engine</label>
+          <select value={generationPreset} onChange={(e) => setGenerationPreset(e.target.value)}
+            className="w-full px-4 py-3 rounded-xl border border-slate-300 bg-white text-sm">
+            <option value="instantid_balanced">InstantID — Cân bằng (bản test trước)</option>
+            <option value="instantid_fidelity">InstantID — Giữ mặt cao</option>
+            <option value="instantid_conservative">InstantID — Bảo thủ / giữ mặt tối đa</option>
+            <option value="faceid_plus">IP-Adapter FaceID Plus — thử nghiệm</option>
+            <option value="pulid_fidelity">PuLID Fidelity — thử nghiệm</option>
+            <option value="original_face">Giữ mặt gốc — không sinh lại khuôn mặt</option>
+          </select>
+          <p className="mt-2 text-xs text-slate-500">Các cấu hình cũ được giữ lại để so sánh. FaceID/PuLID dùng ZeroGPU công cộng nên có thể phải chờ hoặc hết quota.</p>
         </div>
 
         {/* Upload Area */}

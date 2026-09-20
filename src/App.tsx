@@ -47,14 +47,14 @@ export default function App() {
     });
   };
 
-  const handleGenerateStickers = async (image: string, count: number, packName: string) => {
+  const handleGenerateStickers = async (image: string, count: number, packName: string, preset: string) => {
     setIsLoading(true);
     setCurrentPackName(packName);
     try {
       const response = await fetch("/api/generate-stickers", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image, count }),
+        body: JSON.stringify({ image, count, preset }),
       });
 
       const contentType = response.headers.get("content-type") || "";
