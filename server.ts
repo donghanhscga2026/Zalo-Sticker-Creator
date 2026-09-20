@@ -8,7 +8,7 @@ const PORT = Number(process.env.PORT) || 3000;
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
-const CLOUDFLARE_MODEL = "@cf/runwayml/stable-diffusion-v1-5-img2img";
+const CLOUDFLARE_MODEL = "@cf/stabilityai/stable-diffusion-xl-base-1.0";
 
 function getCloudflareConfig() {
   const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
@@ -58,9 +58,11 @@ async function generateOne(source: { mimeType: string; data: string }, pose: typ
       body: JSON.stringify({
         prompt,
         image_b64: source.data,
-        strength: 0.55,
+        strength: 0.45,
         guidance: 7.5,
         num_steps: 20,
+        width: 1024,
+        height: 1024,
       }),
     },
   );
@@ -124,7 +126,9 @@ app.post("/api/generate-stickers", async (req, res) => {
         }
       }
     };
-    await Promise.all(Array.from({ length: Math.min(3, poses.length) }, () => worker()));
+    // Start with one request at a time: safer for free-tier capacity and prevents
+    // multiple wasted generations when the provider rejects a model/account.
+    await worker();
 
     if (fatalError) {
       const status = fatalError?.status === 429 ? 429 : 502;
