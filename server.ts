@@ -153,8 +153,7 @@ app.post("/api/generate-stickers", async (req, res) => {
   try {
     const { image, count = 12 } = req.body as { image?: string; count?: number };
     if (!image) return res.status(400).json({ error: "Chưa có ảnh nguồn." });
-    // Public ZeroGPU is intentionally tested one sticker at a time to conserve free quota.\n    const numStickers = Math.min(Math.max(Number(count) || 1, 1), 1);
-    const poses = STICKER_POSES.slice(0, numStickers);
+    // Public ZeroGPU is intentionally tested one sticker at a time to conserve free quota.\    // Public ZeroGPU test: exactly one sticker per request.\n    const numStickers = 1;\nconst poses = STICKER_POSES.slice(0, numStickers);
     const source = parseDataUrl(image);
     const results = new Array<any>(poses.length);
     const failures: { index: number; message: string }[] = [];
