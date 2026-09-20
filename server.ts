@@ -167,14 +167,29 @@ async function generateOne(source: { mimeType: string; data: string }, pose: typ
   // Modern Gradio FileData often returns /gradio_api/file=<path> or a full URL.
   // Older Spaces used /file=<path>. Try the exact reference first, then both
   // Gradio file routes before failing.
-  const candidates = imageUrl.startsWith("http")
-    ? [imageUrl]
-    : imageUrl.startsWith("/")
-      ? [`${INSTANTID_SPACE}${imageUrl}`]
-      : [
-          `${INSTANTID_SPACE}/gradio_api/file=${encodeURI(imageUrl)}`,
-          `${INSTANTID_SPACE}/file=${encodeURI(imageUrl)}`,
-        ];
+  const normalizeInstantIdFileRef = (ref: string): string[] => {
+    const refs: string[] = [];
+
+    // The public Space currently returns a queue-scoped URL such as
+    // /call/gen/file=/tmp/gradio/.../image.webp. That route is not a public
+    // file-serving endpoint. Extract the underlying Gradio temp path and
+    // rebuild it against the actual file endpoints.
+    const fileMarker = "file=";
+    const markerIndex = ref.indexOf(fileMarker);
+    const rawPath = markerIndex >= 0 ? ref.slice(markerIndex + fileMarker.length) : ref;
+
+    if (ref.startsWith("http")) refs.push(ref);
+    else if (ref.startsWith("/") && markerIndex < 0) refs.push(`${INSTANTID_SPACE}${ref}`);
+
+    if (rawPath) {
+      refs.push(`${INSTANTID_SPACE}/gradio_api/file=${encodeURI(rawPath)}`);
+      refs.push(`${INSTANTID_SPACE}/file=${encodeURI(rawPath)}`);
+    }
+
+    return [...new Set(refs)];
+  };
+
+  const candidates = normalizeInstantIdFileRef(imageUrl);
 
   let imageResponse: Response | null = null;
   let lastStatus = 0;
