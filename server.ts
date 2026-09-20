@@ -39,6 +39,11 @@ function parseDataUrl(dataUrl: string) {
   return { mimeType: "image/jpeg", data: dataUrl };
 }
 
+function isQuotaError(error: any) {
+  const raw = typeof error?.message === "string" ? error.message : JSON.stringify(error ?? {});
+  return error?.status === 429 || error?.code === 429 || raw.includes('"code":429') || raw.includes("RESOURCE_EXHAUSTED") || raw.includes("quota");
+}
+
 function extractGeneratedImage(response: any): string | null {
   const parts = response?.candidates?.[0]?.content?.parts ?? [];
   for (const part of parts) {
@@ -96,6 +101,7 @@ Return the edited/generated image only.`.trim();
       return { id: `sticker_${index + 1}`, title: pose.name, imageUrl, caption: pose.caption };
     } catch (err) {
       lastError = err;
+      if (isQuotaError(err)) throw err;
       if (attempt === 0) await new Promise(r => setTimeout(r, 700));
     }
   }
@@ -122,19 +128,31 @@ app.post("/api/generate-stickers", async (req, res) => {
     const results = new Array<any>(poses.length);
     const failures: { index: number; message: string }[] = [];
     let next = 0;
+    let quotaError: any = null;
     const worker = async () => {
-      while (true) {
+      while (!quotaError) {
         const index = next++;
         if (index >= poses.length) return;
         try {
           results[index] = await generateOne(ai, source, poses[index], index);
         } catch (err: any) {
           console.error(`Sticker ${index + 1} failed:`, err?.message || err);
+          if (isQuotaError(err)) {
+            quotaError = err;
+            return;
+          }
           failures.push({ index, message: err?.message || "Generation failed" });
         }
       }
     };
     await Promise.all(Array.from({ length: Math.min(3, poses.length) }, () => worker()));
+
+    if (quotaError) {
+      return res.status(429).json({
+        error: "Gemini Image hiện không còn quota cho API key/project này. Hãy bật billing hoặc tăng quota cho Gemini API rồi thử lại.",
+        code: "GEMINI_QUOTA_EXCEEDED",
+      });
+    }
 
     const stickers = results.filter(Boolean);
     if (!stickers.length) {
