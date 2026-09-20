@@ -43,53 +43,109 @@ function parseDataUrl(dataUrl: string) {
   return { mimeType: "image/jpeg", data: dataUrl };
 }
 
+const INSTANTID_SPACE = "https://instantx-instantid.hf.space";
+
 async function generateOne(source: { mimeType: string; data: string }, pose: typeof STICKER_POSES[number], index: number) {
-  const { accountId, apiToken } = getCloudflareConfig();
-  const prompt = `Create ONE square photorealistic messaging sticker by EDITING input_image_0. Keep the SAME recognizable person and preserve identity, face shape, eyes, eyebrows, nose, mouth, skin tone, hairstyle/hairline and the same clothing from the reference. Change only the expression/pose as requested: ${pose.prompt}. Upper-body framing, natural anatomy and hands, clean white background, thick white die-cut outline, subtle shadow, centered composition. No circular frame, no caption pill, no extra text unless explicitly requested.`;
+  const hfToken = process.env.HF_TOKEN;
+  const authHeaders: Record<string, string> = hfToken ? { Authorization: `Bearer ${hfToken}` } : {};
 
-  // FLUX.2 Klein image editing uses multipart input. The reference image field
-  // must be named input_image_0 rather than sent as JSON image_b64.
-  const form = new FormData();
-  form.append("prompt", prompt);
+  // Upload the reference portrait to the official public InstantID Gradio Space.
+  const uploadForm = new FormData();
   const imageBytes = Buffer.from(source.data, "base64");
-  form.append("input_image_0", new Blob([imageBytes], { type: source.mimeType }), "reference.jpg");
-  form.append("width", "1024");
-  form.append("height", "1024");
-
-  const response = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${CLOUDFLARE_MODEL}`,
-    {
-      method: "POST",
-      headers: { Authorization: `Bearer ${apiToken}` },
-      body: form,
-    },
-  );
-
-  if (!response.ok) {
-    const detail = await response.text();
-    const error: any = new Error(`Cloudflare Workers AI HTTP ${response.status}: ${detail.slice(0, 700)}`);
-    error.status = response.status;
+  uploadForm.append("files", new Blob([imageBytes], { type: source.mimeType }), "portrait.jpg");
+  const uploadResponse = await fetch(`${INSTANTID_SPACE}/upload`, {
+    method: "POST",
+    headers: authHeaders,
+    body: uploadForm,
+  });
+  if (!uploadResponse.ok) {
+    const detail = await uploadResponse.text();
+    const error: any = new Error(`InstantID upload HTTP ${uploadResponse.status}: ${detail.slice(0, 500)}`);
+    error.status = uploadResponse.status;
     throw error;
   }
+  const uploaded: any = await uploadResponse.json();
+  const uploadedPath = Array.isArray(uploaded) ? uploaded[0] : uploaded?.[0] || uploaded?.path;
+  if (!uploadedPath) throw new Error("InstantID upload không trả về đường dẫn ảnh.");
 
-  const contentType = response.headers.get("content-type") || "application/json";
-  if (contentType.includes("application/json")) {
-    const data: any = await response.json();
-    const b64 = data?.result?.image || data?.result?.image_b64 || data?.image;
-    if (!b64) throw new Error("Cloudflare FLUX.2 không trả về dữ liệu ảnh.");
-    return { id: `sticker_${index + 1}`, title: pose.name, imageUrl: `data:image/png;base64,${b64}`, caption: pose.caption };
+  const prompt = `photorealistic messaging sticker, same person and identity, same clothing, ${pose.prompt}, upper body, natural anatomy and hands, clean white background, centered`;
+  const negativePrompt = "different person, changed identity, deformed face, distorted face, bad eyes, bad hands, extra fingers, extra limbs, low quality, blurry, text, watermark";
+
+  // The official InstantID Space exposes this named Gradio endpoint.
+  // IdentityNet and adapter strengths are deliberately high to prioritize likeness.
+  const callResponse = await fetch(`${INSTANTID_SPACE}/call/generate_image`, {
+    method: "POST",
+    headers: { ...authHeaders, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      data: [
+        { path: uploadedPath, meta: { _type: "gradio.FileData" } },
+        null,
+        prompt,
+        negativePrompt,
+        "(No style)",
+        20,
+        1.0,
+        1.0,
+        0.4,
+        0.0,
+        0.0,
+        ["pose"],
+        4.5,
+        42 + index,
+        "EulerDiscreteScheduler",
+        false,
+        true
+      ]
+    }),
+  });
+  if (!callResponse.ok) {
+    const detail = await callResponse.text();
+    const error: any = new Error(`InstantID call HTTP ${callResponse.status}: ${detail.slice(0, 700)}`);
+    error.status = callResponse.status;
+    throw error;
   }
+  const callData: any = await callResponse.json();
+  if (!callData?.event_id) throw new Error("InstantID không trả về event_id.");
 
-  const bytes = Buffer.from(await response.arrayBuffer());
-  return { id: `sticker_${index + 1}`, title: pose.name, imageUrl: `data:${contentType.split(";")[0]};base64,${bytes.toString("base64")}`, caption: pose.caption };
+  // Gradio returns generation results as server-sent events.
+  const resultResponse = await fetch(`${INSTANTID_SPACE}/call/generate_image/${callData.event_id}`, {
+    headers: authHeaders,
+  });
+  if (!resultResponse.ok) {
+    const detail = await resultResponse.text();
+    const error: any = new Error(`InstantID result HTTP ${resultResponse.status}: ${detail.slice(0, 700)}`);
+    error.status = resultResponse.status;
+    throw error;
+  }
+  const eventText = await resultResponse.text();
+  const dataLines = eventText.split("\n").filter(line => line.startsWith("data: "));
+  if (!dataLines.length) throw new Error(`InstantID không trả về ảnh: ${eventText.slice(-700)}`);
+  const payload: any = JSON.parse(dataLines[dataLines.length - 1].slice(6));
+  const first = Array.isArray(payload?.[0]) ? payload[0][0] : payload?.[0];
+  const imageUrl = first?.url || first?.path || first;
+  if (typeof imageUrl !== "string") throw new Error("Không đọc được URL ảnh từ InstantID.");
+
+  const absoluteUrl = imageUrl.startsWith("http") ? imageUrl : `${INSTANTID_SPACE}/file=${imageUrl}`;
+  const imageResponse = await fetch(absoluteUrl, { headers: authHeaders });
+  if (!imageResponse.ok) throw new Error(`Không tải được ảnh InstantID (HTTP ${imageResponse.status}).`);
+  const outputType = imageResponse.headers.get("content-type") || "image/png";
+  const outputBytes = Buffer.from(await imageResponse.arrayBuffer());
+
+  return {
+    id: `sticker_${index + 1}`,
+    title: pose.name,
+    imageUrl: `data:${outputType.split(";")[0]};base64,${outputBytes.toString("base64")}`,
+    caption: pose.caption,
+  };
 }
 
 app.get("/api/health", (_req, res) => {
   res.json({
     status: "ok",
-    imageProvider: "cloudflare-workers-ai",
-    imageModel: CLOUDFLARE_MODEL,
-    configured: Boolean(process.env.CLOUDFLARE_ACCOUNT_ID && process.env.CLOUDFLARE_API_TOKEN),
+    imageProvider: "huggingface-instantid-public-space",
+    imageModel: "InstantX/InstantID",
+    configured: true,
+    hfTokenConfigured: Boolean(process.env.HF_TOKEN),
   });
 });
 
@@ -97,11 +153,7 @@ app.post("/api/generate-stickers", async (req, res) => {
   try {
     const { image, count = 12 } = req.body as { image?: string; count?: number };
     if (!image) return res.status(400).json({ error: "Chưa có ảnh nguồn." });
-    if (!process.env.CLOUDFLARE_ACCOUNT_ID || !process.env.CLOUDFLARE_API_TOKEN) {
-      return res.status(503).json({ error: "Chưa cấu hình CLOUDFLARE_ACCOUNT_ID và CLOUDFLARE_API_TOKEN trong AI Studio Secrets." });
-    }
-
-    const numStickers = Math.min(Math.max(Number(count) || 12, 1), 15);
+    // Public ZeroGPU is intentionally tested one sticker at a time to conserve free quota.\n    const numStickers = Math.min(Math.max(Number(count) || 1, 1), 1);
     const poses = STICKER_POSES.slice(0, numStickers);
     const source = parseDataUrl(image);
     const results = new Array<any>(poses.length);
@@ -129,12 +181,9 @@ app.post("/api/generate-stickers", async (req, res) => {
     await worker();
 
     if (fatalError) {
-      const status = fatalError?.status === 429 ? 429 : 502;
-      return res.status(status).json({
-        error: fatalError?.status === 429
-          ? "Cloudflare Workers AI đã chạm giới hạn miễn phí hiện tại. Hãy thử lại sau khi quota được làm mới."
-          : `Cloudflare Workers AI không chấp nhận yêu cầu: ${fatalError?.message || "kiểm tra model, Account ID và API Token."}`,
-        code: fatalError?.status === 429 ? "CLOUDFLARE_QUOTA_EXCEEDED" : "CLOUDFLARE_AUTH_ERROR",
+      return res.status(502).json({
+        error: `InstantID public Space lỗi: ${fatalError?.message || "unknown error"}`,
+        code: "INSTANTID_PUBLIC_SPACE_ERROR",
       });
     }
 
