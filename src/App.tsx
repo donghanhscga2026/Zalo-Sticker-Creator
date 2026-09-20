@@ -57,8 +57,17 @@ export default function App() {
         body: JSON.stringify({ image, count }),
       });
 
-      const data = await response.json();
-      if (!response.ok) throw new Error(data?.error || "Không thể tạo sticker bằng AI");
+      const contentType = response.headers.get("content-type") || "";
+      const data = contentType.includes("application/json")
+        ? await response.json()
+        : { error: await response.text() };
+
+      if (!response.ok) {
+        if (response.status === 429 || data?.code === "GEMINI_QUOTA_EXCEEDED") {
+          throw new Error("Gemini Image đã hết quota. Hãy kiểm tra billing/quota của Gemini API rồi thử lại.");
+        }
+        throw new Error(data?.error || `Không thể tạo sticker bằng AI (HTTP ${response.status})`);
+      }
 
       const stickers = data?.stickers as Sticker[] | undefined;
       if (!stickers?.length) throw new Error("AI không trả về sticker nào");
@@ -67,7 +76,7 @@ export default function App() {
       setActiveTab("editor");
     } catch (err) {
       console.error("Error generating stickers:", err);
-      alert("Có lỗi xảy ra khi tạo sticker. Vui lòng thử lại.");
+      alert(err instanceof Error ? err.message : "Có lỗi xảy ra khi tạo sticker. Vui lòng thử lại.");
     } finally {
       setIsLoading(false);
     }
