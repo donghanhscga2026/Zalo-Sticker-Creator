@@ -164,9 +164,32 @@ async function generateOne(source: { mimeType: string; data: string }, pose: typ
     throw new Error(`Không đọc được URL ảnh từ InstantID. Payload: ${JSON.stringify(payload).slice(0, 700)}`);
   }
 
-  const absoluteUrl = imageUrl.startsWith("http") ? imageUrl : `${INSTANTID_SPACE}/file=${imageUrl}`;
-  const imageResponse = await fetch(absoluteUrl, { headers: authHeaders });
-  if (!imageResponse.ok) throw new Error(`Không tải được ảnh InstantID (HTTP ${imageResponse.status}).`);
+  // Modern Gradio FileData often returns /gradio_api/file=<path> or a full URL.
+  // Older Spaces used /file=<path>. Try the exact reference first, then both
+  // Gradio file routes before failing.
+  const candidates = imageUrl.startsWith("http")
+    ? [imageUrl]
+    : imageUrl.startsWith("/")
+      ? [`${INSTANTID_SPACE}${imageUrl}`]
+      : [
+          `${INSTANTID_SPACE}/gradio_api/file=${encodeURI(imageUrl)}`,
+          `${INSTANTID_SPACE}/file=${encodeURI(imageUrl)}`,
+        ];
+
+  let imageResponse: Response | null = null;
+  let lastStatus = 0;
+  for (const candidate of candidates) {
+    const attempt = await fetch(candidate, { headers: authHeaders });
+    lastStatus = attempt.status;
+    if (attempt.ok) {
+      imageResponse = attempt;
+      break;
+    }
+  }
+  if (!imageResponse) {
+    console.error("InstantID image reference:", imageUrl);
+    throw new Error(`Không tải được ảnh InstantID (HTTP ${lastStatus}). Ref: ${imageUrl.slice(0, 300)}`);
+  }
   const outputType = imageResponse.headers.get("content-type") || "image/png";
   const outputBytes = Buffer.from(await imageResponse.arrayBuffer());
 
