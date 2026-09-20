@@ -4,149 +4,161 @@ import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
 const getAiClient = () => {
   const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error("GEMINI_API_KEY environment variable is required");
-  }
+  if (!apiKey) throw new Error("GEMINI_API_KEY is not configured. Add it in AI Studio > Secrets.");
   return new GoogleGenAI({ apiKey });
 };
 
 const STICKER_POSES = [
-  { name: "Thumbs Up", prompt: "Person giving a thumbs up gesture, smiling joyfully, with yellow sparkle lines, solid white background, die-cut sticker style with thick white border", caption: "OK" },
-  { name: "Finger Heart", prompt: "Person doing Korean finger heart gesture, sweet cute smile, floating red hearts, solid white background, die-cut sticker style with thick white border", caption: "Yêu" },
-  { name: "Resting Chin", prompt: "Person resting chin on hands, sweet dreamy expression, floating red hearts, solid white background, die-cut sticker style with thick white border", caption: "Hihi" },
-  { name: "Cool Sunglasses", prompt: "Person wearing cool black sunglasses, pointing fingers forward, yellow sparkles, solid white background, die-cut sticker style with thick white border", caption: "Cool" },
-  { name: "Thinking", prompt: "Person with hand on chin looking thoughtfully, blue question mark, solid white background, die-cut sticker style with thick white border", caption: "Hmm..." },
-  { name: "Shocked", prompt: "Person with hands on cheeks in delightful surprise, wide open mouth, yellow motion lines, solid white background, die-cut sticker style with thick white border", caption: "Ôi!" },
-  { name: "Coffee Chill", prompt: "Person holding a smiley white coffee cup, relaxed happy smile, floating heart symbol, solid white background, die-cut sticker style with thick white border", caption: "Chill" },
-  { name: "Laughing HA HA", prompt: "Person laughing joyfully with eyes closed, open mouth, comic text 'HA HA' and action lines, solid white background, die-cut sticker style with thick white border", caption: "Haha" },
-  { name: "Salute", prompt: "Person doing a military salute pose with sunglasses, solid white background, die-cut sticker style with thick white border", caption: "Roài" },
-  { name: "Double Hearts", prompt: "Person doing double finger hearts with loving look, floating red hearts, solid white background, die-cut sticker style with thick white border", caption: "Muaah" },
-  { name: "Side Profile", prompt: "Person with head turned looking back over shoulder, gentle smile, solid white background, die-cut sticker style with thick white border", caption: "Đẹp" },
-  { name: "Holding Heart", prompt: "Person holding a large red heart in both hands, affectionate happy smile, floating red hearts, solid white background, die-cut sticker style with thick white border", caption: "Love" }
+  { name: "Thumbs Up", prompt: "joyful big smile, one hand clearly giving a thumbs-up toward camera; yellow comic excitement rays", caption: "OK" },
+  { name: "Finger Heart", prompt: "playful wink, one hand making a clear Korean finger-heart; several small red hearts", caption: "Yêu" },
+  { name: "Cute Cheeks", prompt: "eyes happily closed, both open palms cupping the cheeks symmetrically; dreamy red hearts", caption: "Hihi" },
+  { name: "Cool", prompt: "wearing black sunglasses, smiling, both hands doing playful finger-guns; golden sparkles", caption: "Cool" },
+  { name: "Thinking", prompt: "thoughtful sideways glance, one hand under chin; large blue question mark", caption: "Hmm..." },
+  { name: "Surprised", prompt: "wide surprised eyes and O-shaped mouth, both palms on cheeks; yellow comic surprise rays", caption: "Ôi!" },
+  { name: "Coffee", prompt: "relaxed warm smile while holding a small white coffee mug with a simple smiley face", caption: "Chill" },
+  { name: "Laughing", prompt: "laughing hard with eyes squeezed closed and head tilted slightly; black comic HA HA lettering beside the head", caption: "Haha" },
+  { name: "Salute", prompt: "black sunglasses and a crisp playful salute with one hand; cheerful smile", caption: "Roài" },
+  { name: "Double Hearts", prompt: "both hands visible, each hand making a Korean finger-heart; bright affectionate smile; red hearts", caption: "Muaah" },
+  { name: "Look Back", prompt: "upper body turned away about 45 degrees, looking back over the shoulder at camera with a gentle smile; yellow accent rays", caption: "Đẹp" },
+  { name: "Big Heart", prompt: "holding one large flat red heart prop with both hands in front of chest, playful wink and smile; floating red hearts", caption: "Love" },
+  { name: "Fighting", prompt: "determined but cute smile, one clenched fist raised in an encouraging fighting pose; energetic comic rays", caption: "Cố lên" },
+  { name: "Shy", prompt: "shy bashful smile, slightly rosy cheeks, shoulders tucked in; tiny pink hearts and sparkles", caption: "Ái chà" },
+  { name: "Hello", prompt: "friendly enthusiastic wave with one open hand, bright welcoming smile; cheerful motion lines", caption: "Hello" },
 ];
 
-app.get("/api/health", (req, res) => {
-  res.json({ status: "ok" });
+function parseDataUrl(dataUrl: string) {
+  const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/s);
+  if (match) return { mimeType: match[1], data: match[2] };
+  return { mimeType: "image/jpeg", data: dataUrl };
+}
+
+function extractGeneratedImage(response: any): string | null {
+  const parts = response?.candidates?.[0]?.content?.parts ?? [];
+  for (const part of parts) {
+    const inline = part?.inlineData;
+    if (inline?.data) return `data:${inline.mimeType || "image/png"};base64,${inline.data}`;
+  }
+  return null;
+}
+
+async function generateOne(ai: GoogleGenAI, source: { mimeType: string; data: string }, pose: typeof STICKER_POSES[number], index: number) {
+  const prompt = `
+Edit the uploaded portrait into ONE polished chat sticker. The uploaded person is the identity reference.
+
+IDENTITY — highest priority:
+- Keep the same recognizable person: facial proportions, eyes, eyebrows, nose, mouth, smile characteristics, skin tone, head shape and hairstyle/hairline.
+- Do not replace the person with a generic lookalike and do not beautify them into a different face.
+- Keep the same blue polo shirt from the reference unless an accessory in the requested pose requires otherwise.
+
+POSE / EXPRESSION FOR THIS STICKER:
+${pose.prompt}
+
+COMPOSITION / STYLE:
+- Photorealistic cutout sticker made from the same person, not a cartoon and not an illustration.
+- Upper body / waist-up framing with hands fully visible when the pose uses hands. Correct anatomy: exactly two arms and two hands, five fingers per hand, no merged or duplicated fingers.
+- Subject centered, large enough to read as a messaging sticker, with comfortable empty margin around the silhouette.
+- Clean pure white background (#FFFFFF).
+- Add a smooth thick white die-cut outline around the person's silhouette and props, plus a very subtle light-gray outer edge/shadow so the cutout is visible on white.
+- Decorative hearts/rays/sparkles may sit around the person as requested.
+- Do NOT add a circular portrait frame. Do NOT put the person inside a circle or badge.
+- Do NOT add a caption pill at the bottom. Do not add any text except when the pose explicitly requests comic text such as HA HA.
+- Square 1:1 sticker composition.
+
+Return the edited/generated image only.`.trim();
+
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const response = await ai.models.generateContent({
+        model: "gemini-3.1-flash-image",
+        contents: [{
+          role: "user",
+          parts: [
+            { inlineData: { data: source.data, mimeType: source.mimeType } },
+            { text: prompt },
+          ],
+        }],
+        config: {
+          responseModalities: ["IMAGE"],
+          imageConfig: { aspectRatio: "1:1" },
+        },
+      } as any);
+
+      const imageUrl = extractGeneratedImage(response);
+      if (!imageUrl) throw new Error("Image model returned no image data");
+      return { id: `sticker_${index + 1}`, title: pose.name, imageUrl, caption: pose.caption };
+    } catch (err) {
+      lastError = err;
+      if (attempt === 0) await new Promise(r => setTimeout(r, 700));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("Unknown image generation error");
+}
+
+app.get("/api/health", (_req, res) => {
+  res.json({ status: "ok", imageModel: "gemini-3.1-flash-image", apiKeyConfigured: Boolean(process.env.GEMINI_API_KEY) });
 });
 
 app.post("/api/generate-stickers", async (req, res) => {
   try {
-    const { image, count = 12 } = req.body;
-    if (!image) {
-      return res.status(400).json({ error: "No image provided" });
+    const { image, count = 12 } = req.body as { image?: string; count?: number };
+    if (!image) return res.status(400).json({ error: "Chưa có ảnh nguồn." });
+    if (!process.env.GEMINI_API_KEY) {
+      return res.status(503).json({ error: "Chưa cấu hình GEMINI_API_KEY trong AI Studio Secrets. App sẽ không dùng ảnh gốc giả làm kết quả AI nữa." });
     }
 
     const numStickers = Math.min(Math.max(Number(count) || 12, 9), 15);
-    const posesToUse = STICKER_POSES.slice(0, numStickers);
-    const hasApiKey = Boolean(process.env.GEMINI_API_KEY);
-    const results = [];
+    const poses = STICKER_POSES.slice(0, numStickers);
+    const source = parseDataUrl(image);
+    const ai = getAiClient();
 
-    if (hasApiKey) {
-      try {
-        const ai = getAiClient();
-        const base64Data = image.includes(",") ? image.split(",")[1] : image;
-        const mimeType = image.includes("image/png") ? "image/png" : "image/jpeg";
-
-        for (let i = 0; i < posesToUse.length; i++) {
-          const pose = posesToUse[i];
-          try {
-            const promptText = `Based on the facial features and identity of the person in this uploaded photo, generate a complete upper-body sticker character maintaining the exact same facial identity. Pose/Action: ${pose.prompt}. The sticker must feature a clean solid white background, die-cut sticker style with a prominent thick white border outline, vibrant and expressive chat sticker art.`;
-
-            const response = await ai.models.generateContent({
-              model: "gemini-3.6-flash",
-              contents: {
-                parts: [
-                  { inlineData: { data: base64Data, mimeType } },
-                  { text: promptText }
-                ]
-              }
-            });
-
-            let generatedImageBase64 = null;
-            if (response.candidates?.[0]?.content?.parts) {
-              for (const part of response.candidates[0].content.parts) {
-                if (part.inlineData) {
-                  generatedImageBase64 = `data:image/png;base64,${part.inlineData.data}`;
-                  break;
-                }
-              }
-            }
-
-            if (generatedImageBase64) {
-              results.push({
-                id: `sticker_${i + 1}`,
-                title: pose.name,
-                imageUrl: generatedImageBase64,
-                caption: pose.caption
-              });
-            } else {
-              results.push({
-                id: `sticker_${i + 1}`,
-                title: pose.name,
-                imageUrl: image,
-                caption: pose.caption
-              });
-            }
-          } catch (poseErr: any) {
-            console.error(`Pose ${i + 1} generation note:`, poseErr?.message || poseErr);
-            results.push({
-              id: `sticker_${i + 1}`,
-              title: pose.name,
-              imageUrl: image,
-              caption: pose.caption
-            });
-          }
+    const results = new Array<any>(poses.length);
+    const failures: { index: number; message: string }[] = [];
+    let next = 0;
+    const worker = async () => {
+      while (true) {
+        const index = next++;
+        if (index >= poses.length) return;
+        try {
+          results[index] = await generateOne(ai, source, poses[index], index);
+        } catch (err: any) {
+          console.error(`Sticker ${index + 1} failed:`, err?.message || err);
+          failures.push({ index, message: err?.message || "Generation failed" });
         }
-
-        return res.json({ success: true, stickers: results });
-      } catch (err: any) {
-        console.warn("AI pose generation fallback:", err?.message || err);
       }
+    };
+    await Promise.all(Array.from({ length: Math.min(3, poses.length) }, () => worker()));
+
+    const stickers = results.filter(Boolean);
+    if (!stickers.length) {
+      return res.status(502).json({ error: `AI không tạo được ảnh. ${failures[0]?.message || "Kiểm tra API key/quota/model access."}` });
     }
 
-    // Fallback if no API key or generation failed
-    for (let i = 0; i < posesToUse.length; i++) {
-      const pose = posesToUse[i];
-      results.push({
-        id: `sticker_${i + 1}`,
-        title: pose.name,
-        imageUrl: image,
-        caption: pose.caption
-      });
-    }
-
-    res.json({ success: true, stickers: results, note: "Generated using sticker pose templates." });
+    res.json({ success: true, stickers, requested: poses.length, generated: stickers.length, failures });
   } catch (error: any) {
     console.error("Error in /api/generate-stickers:", error);
-    res.status(500).json({ error: error.message || "Failed to generate stickers" });
+    res.status(500).json({ error: error?.message || "Failed to generate stickers" });
   }
 });
 
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
+    const vite = await createViteServer({ server: { middlewareMode: true }, appType: "spa" });
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
-    app.get("*", (req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
-    });
+    app.get("*", (_req, res) => res.sendFile(path.join(distPath, "index.html")));
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-  });
+  app.listen(PORT, "0.0.0.0", () => console.log(`Server running on http://localhost:${PORT}`));
 }
 
 startServer();
