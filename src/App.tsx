@@ -5,7 +5,6 @@ import { StickerEditor } from "./components/StickerEditor";
 import { LibraryModal } from "./components/LibraryModal";
 import { ZaloGuideModal } from "./components/ZaloGuideModal";
 import { Sticker, StickerPack } from "./types";
-import { generateExpressiveStickers } from "./lib/stickerGenerator";
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<"create" | "editor" | "library">("create");
@@ -15,19 +14,15 @@ export default function App() {
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [showZaloGuide, setShowZaloGuide] = useState<boolean>(false);
 
-  // Load saved packs from localStorage on mount
   useEffect(() => {
     try {
       const stored = localStorage.getItem("zalo_sticker_packs");
-      if (stored) {
-        setSavedPacks(JSON.parse(stored));
-      }
+      if (stored) setSavedPacks(JSON.parse(stored));
     } catch (e) {
       console.error("Failed to load saved packs:", e);
     }
   }, []);
 
-  // Save packs to localStorage
   const handleSavePack = (newPack: StickerPack) => {
     setSavedPacks((prev) => {
       const updated = [newPack, ...prev.filter((p) => p.id !== newPack.id)];
@@ -56,14 +51,20 @@ export default function App() {
     setIsLoading(true);
     setCurrentPackName(packName);
     try {
-      // Generate instantly and reliably on client-side canvas
-      const stickers = await generateExpressiveStickers(image, count);
-      if (stickers && stickers.length > 0) {
-        setCurrentStickers(stickers);
-        setActiveTab("editor");
-      } else {
-        throw new Error("Không thể tạo sticker");
-      }
+      const response = await fetch("/api/generate-stickers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image, count }),
+      });
+
+      const data = await response.json();
+      if (!response.ok) throw new Error(data?.error || "Không thể tạo sticker bằng AI");
+
+      const stickers = data?.stickers as Sticker[] | undefined;
+      if (!stickers?.length) throw new Error("AI không trả về sticker nào");
+
+      setCurrentStickers(stickers);
+      setActiveTab("editor");
     } catch (err) {
       console.error("Error generating stickers:", err);
       alert("Có lỗi xảy ra khi tạo sticker. Vui lòng thử lại.");
@@ -89,15 +90,8 @@ export default function App() {
         onOpenZaloGuide={() => setShowZaloGuide(true)}
         savedPacksCount={savedPacks.length}
       />
-
       <main className="pb-16">
-        {activeTab === "create" && (
-          <PhotoUploader
-            onGenerate={handleGenerateStickers}
-            isLoading={isLoading}
-          />
-        )}
-
+        {activeTab === "create" && <PhotoUploader onGenerate={handleGenerateStickers} isLoading={isLoading} />}
         {activeTab === "editor" && (
           <StickerEditor
             packName={currentPackName}
@@ -107,7 +101,6 @@ export default function App() {
             onOpenZaloGuide={() => setShowZaloGuide(true)}
           />
         )}
-
         {activeTab === "library" && (
           <LibraryModal
             savedPacks={savedPacks}
@@ -117,10 +110,7 @@ export default function App() {
           />
         )}
       </main>
-
-      {showZaloGuide && (
-        <ZaloGuideModal onClose={() => setShowZaloGuide(false)} />
-      )}
+      {showZaloGuide && <ZaloGuideModal onClose={() => setShowZaloGuide(false)} />}
     </div>
   );
 }
