@@ -10,7 +10,8 @@ export const PhotoUploader: React.FC<PhotoUploaderProps> = ({ onGenerate, isLoad
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
   const [stickerCount, setStickerCount] = useState<number>(12);
   const [packName, setPackName] = useState<string>("Bộ Sticker Đáng Yêu");
-  const [dragOver, setDragOver] = useState<boolean>(false);\n  const [generationPreset, setGenerationPreset] = useState<string>("instantid_conservative");
+  const [dragOver, setDragOver] = useState<boolean>(false);
+  const [generationPreset, setGenerationPreset] = useState<string>("instantid_conservative");
   const [error, setError] = useState<string | null>(null);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
