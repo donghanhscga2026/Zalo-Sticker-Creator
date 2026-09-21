@@ -128,10 +128,10 @@ export const PhotoUploader: React.FC<PhotoUploaderProps> = ({ onGenerate, isLoad
             <option value="instantid_fidelity">InstantID — Giữ mặt cao</option>
             <option value="instantid_conservative">InstantID — Bảo thủ / giữ mặt tối đa</option>
             <option value="faceid_plus">IP-Adapter FaceID Plus — thử nghiệm</option>
-            <option value="pulid_fidelity">PuLID Fidelity — thử nghiệm</option>
+            <option value="pulid_fidelity">PuLID SDXL Fidelity — bản đang thử</option>\n            <option value="pulid_flux_fidelity">PuLID-FLUX v0.9.1 / Krea — fidelity mới nhất</option>
             <option value="original_face">Giữ mặt gốc — không sinh lại khuôn mặt</option>
           </select>
-          <p className="mt-2 text-xs text-slate-500">Các cấu hình cũ được giữ lại để so sánh. FaceID/PuLID dùng ZeroGPU công cộng nên có thể phải chờ hoặc hết quota.</p>
+          <p className="mt-2 text-xs text-slate-500">Các cấu hình cũ được giữ lại để so sánh. PuLID-FLUX dùng Space chính thức ZeroGPU và kiểm tra schema API sống trước khi tạo ảnh.</p>
         </div>
 
         {/* Upload Area */}
