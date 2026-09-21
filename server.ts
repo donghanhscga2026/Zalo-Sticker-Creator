@@ -363,12 +363,40 @@ async function generatePulidFluxFidelity(source: { mimeType: string; data: strin
     512,
   ];
 
-  // Use the compatibility call route supported across Gradio 5/6.
-  const callResponse = await fetch(`${PULID_FLUX_SPACE}/gradio_api/call/generate_image`, {
+  // Prefer the current Gradio 6 v2 named-parameter API. If the Space is
+  // temporarily running Gradio 5, fall back to the positional compatibility
+  // route that is also supported by Gradio 6.
+  const fileData = { path: uploadedPath, orig_name: "portrait.jpg", meta: { _type: "gradio.FileData" } };
+  const v2Payload = {
+    prompt,
+    id_image: fileData,
+    start_step: 2,
+    guidance: 4,
+    seed: 42 + index,
+    true_cfg: 1,
+    width: 896,
+    height: 1152,
+    num_steps: 28,
+    id_weight: 1.0,
+    neg_prompt: negativePrompt,
+    timestep_to_start_cfg: 1,
+    max_sequence_length: 512,
+  };
+
+  let callResponse = await fetch(`${PULID_FLUX_SPACE}/gradio_api/call/v2/generate_image`, {
     method: "POST",
     headers: { ...authHeaders, "Content-Type": "application/json" },
-    body: JSON.stringify({ data }),
+    body: JSON.stringify(v2Payload),
   });
+
+  if (callResponse.status === 404 || callResponse.status === 405) {
+    callResponse = await fetch(`${PULID_FLUX_SPACE}/gradio_api/call/generate_image`, {
+      method: "POST",
+      headers: { ...authHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({ data }),
+    });
+  }
+
   if (!callResponse.ok) {
     const detail = await callResponse.text();
     throw Object.assign(new Error(`PuLID-FLUX call HTTP ${callResponse.status}: ${detail.slice(0, 700)}`), { status: callResponse.status });
