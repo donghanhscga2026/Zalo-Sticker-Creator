@@ -44,6 +44,7 @@ function parseDataUrl(dataUrl: string) {
 }
 
 const INSTANTID_SPACE = "https://instantx-instantid.hf.space";
+const PULID_SPACE = "https://yanze-pulid.hf.space";
 
 type GenerationPreset = "instantid_balanced" | "instantid_fidelity" | "instantid_conservative" | "faceid_plus" | "pulid_fidelity" | "original_face";
 const INSTANTID_PRESETS = {
@@ -224,6 +225,89 @@ async function generateOne(source: { mimeType: string; data: string }, pose: typ
   };
 }
 
+
+async function generatePulidFidelity(source: { mimeType: string; data: string }, pose: typeof STICKER_POSES[number], index: number) {
+  const hfToken = process.env.HF_TOKEN;
+  const authHeaders: Record<string, string> = hfToken ? { Authorization: `Bearer ${hfToken}` } : {};
+  const uploadForm = new FormData();
+  uploadForm.append("files", new Blob([Buffer.from(source.data, "base64")], { type: source.mimeType }), "portrait.jpg");
+  const uploadResponse = await fetch(`${PULID_SPACE}/upload`, { method: "POST", headers: authHeaders, body: uploadForm });
+  if (!uploadResponse.ok) {
+    const detail = await uploadResponse.text();
+    throw Object.assign(new Error(`PuLID upload HTTP ${uploadResponse.status}: ${detail.slice(0, 500)}`), { status: uploadResponse.status });
+  }
+  const uploaded: any = await uploadResponse.json();
+  const uploadedPath = Array.isArray(uploaded) ? uploaded[0] : uploaded?.[0] || uploaded?.path;
+  if (!uploadedPath) throw new Error("PuLID upload không trả về đường dẫn ảnh.");
+
+  const prompt = `photorealistic portrait, exact same person and facial identity as reference, same age, hairstyle, skin tone and clothing, ${pose.prompt}, upper body, realistic skin texture, clean white background, no text, no decorations`;
+  const negativePrompt = "different person, changed identity, beauty filter, altered face, doll face, cartoon, text, watermark, deformed face, bad eyes, bad hands, extra fingers, extra limbs, blurry";
+  const data = [
+    { path: uploadedPath, meta: { _type: "gradio.FileData" } },
+    null, null, null, prompt, negativePrompt,
+    1.2, 1, 42 + index, 8, 1024, 768, 1.2, "fidelity", false
+  ];
+  const callResponse = await fetch(`${PULID_SPACE}/call/run`, {
+    method: "POST",
+    headers: { ...authHeaders, "Content-Type": "application/json" },
+    body: JSON.stringify({ data }),
+  });
+  if (!callResponse.ok) {
+    const detail = await callResponse.text();
+    throw Object.assign(new Error(`PuLID call HTTP ${callResponse.status}: ${detail.slice(0, 700)}`), { status: callResponse.status });
+  }
+  const callData: any = await callResponse.json();
+  if (!callData?.event_id) throw new Error("PuLID không trả về event_id.");
+  const resultResponse = await fetch(`${PULID_SPACE}/call/run/${callData.event_id}`, { headers: authHeaders });
+  if (!resultResponse.ok) throw Object.assign(new Error(`PuLID result HTTP ${resultResponse.status}`), { status: resultResponse.status });
+  const eventText = await resultResponse.text();
+  const dataLines = eventText.split("\n").filter((line) => line.startsWith("data: "));
+  if (!dataLines.length) throw new Error(`PuLID không trả về ảnh: ${eventText.slice(-700)}`);
+  const payload: any = JSON.parse(dataLines[dataLines.length - 1].slice(6));
+
+  const findImageRef = (value: any): string | null => {
+    if (!value) return null;
+    if (typeof value === "string") {
+      const lower = value.toLowerCase();
+      return value.startsWith("http://") || value.startsWith("https://") ||
+        lower.includes(".png") || lower.includes(".jpg") || lower.includes(".jpeg") || lower.includes(".webp") ? value : null;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) { const found = findImageRef(item); if (found) return found; }
+      return null;
+    }
+    if (typeof value === "object") {
+      if (typeof value.url === "string") return value.url;
+      if (typeof value.path === "string") return value.path;
+      for (const child of Object.values(value)) { const found = findImageRef(child); if (found) return found; }
+    }
+    return null;
+  };
+  const imageRef = findImageRef(payload);
+  if (!imageRef) throw new Error(`Không đọc được ảnh PuLID. Payload: ${JSON.stringify(payload).slice(0, 700)}`);
+  const marker = imageRef.indexOf("file=");
+  const rawPath = marker >= 0 ? imageRef.slice(marker + 5) : imageRef;
+  const candidates = [
+    ...(imageRef.startsWith("http") ? [imageRef] : []),
+    `${PULID_SPACE}/gradio_api/file=${encodeURI(rawPath)}`,
+    `${PULID_SPACE}/file=${encodeURI(rawPath)}`,
+  ];
+  let imageResponse: Response | null = null;
+  for (const candidate of [...new Set(candidates)]) {
+    const attempt = await fetch(candidate, { headers: authHeaders });
+    if (attempt.ok) { imageResponse = attempt; break; }
+  }
+  if (!imageResponse) throw new Error(`Không tải được ảnh PuLID. Ref: ${imageRef.slice(0, 300)}`);
+  const outputType = imageResponse.headers.get("content-type") || "image/png";
+  const outputBytes = Buffer.from(await imageResponse.arrayBuffer());
+  return {
+    id: `sticker_${index + 1}`,
+    title: `${pose.name} · PuLID Fidelity`,
+    imageUrl: `data:${outputType.split(";")[0]};base64,${outputBytes.toString("base64")}`,
+    caption: pose.caption,
+  };
+}
+
 app.get("/api/health", (_req, res) => {
   res.json({
     status: "ok",
@@ -238,7 +322,7 @@ app.post("/api/generate-stickers", async (req, res) => {
   try {
     const { image, count = 12, preset = "instantid_conservative" } = req.body as { image?: string; count?: number; preset?: GenerationPreset };
     if (!image) return res.status(400).json({ error: "Chưa có ảnh nguồn." });
-    if (preset === "faceid_plus" || preset === "pulid_fidelity" || preset === "original_face") {
+    if (preset === "faceid_plus" || preset === "original_face") {
       return res.status(501).json({ error: "Preset này đang ở chế độ thử nghiệm và chưa được kích hoạt an toàn. Hãy dùng một trong 3 preset InstantID trong lúc tích hợp provider được xác minh." });
     }
     // Public ZeroGPU test: exactly one sticker per request.
@@ -254,7 +338,9 @@ app.post("/api/generate-stickers", async (req, res) => {
         const index = next++;
         if (index >= poses.length) return;
         try {
-          results[index] = await generateOne(source, poses[index], index, preset);
+          results[index] = preset === "pulid_fidelity"
+            ? await generatePulidFidelity(source, poses[index], index)
+            : await generateOne(source, poses[index], index, preset);
         } catch (err: any) {
           console.error(`Sticker ${index + 1} failed:`, err?.message || err);
           if (err?.status === 400 || err?.status === 401 || err?.status === 403 || err?.status === 429) {
