@@ -45,8 +45,9 @@ function parseDataUrl(dataUrl: string) {
 
 const INSTANTID_SPACE = "https://instantx-instantid.hf.space";
 const PULID_SPACE = "https://yanze-pulid.hf.space";
+const PULID_FLUX_SPACE = "https://yanze-pulid-flux.hf.space";
 
-type GenerationPreset = "instantid_balanced" | "instantid_fidelity" | "instantid_conservative" | "faceid_plus" | "pulid_fidelity" | "original_face";
+type GenerationPreset = "instantid_balanced" | "instantid_fidelity" | "instantid_conservative" | "faceid_plus" | "pulid_fidelity" | "pulid_flux_fidelity" | "original_face";
 const INSTANTID_PRESETS = {
   instantid_balanced: { steps: 20, identity: 1.1, adapter: 1.1, cfg: 4.5 },
   instantid_fidelity: { steps: 30, identity: 1.35, adapter: 1.25, cfg: 3.5 },
@@ -308,6 +309,143 @@ async function generatePulidFidelity(source: { mimeType: string; data: string },
   };
 }
 
+
+async function generatePulidFluxFidelity(source: { mimeType: string; data: string }, pose: typeof STICKER_POSES[number], index: number) {
+  const hfToken = process.env.HF_TOKEN;
+  const authHeaders: Record<string, string> = hfToken ? { Authorization: `Bearer ${hfToken}` } : {};
+
+  // Verify the live Gradio schema before spending a ZeroGPU generation.
+  const infoResponse = await fetch(`${PULID_FLUX_SPACE}/gradio_api/info`, { headers: authHeaders });
+  if (!infoResponse.ok) {
+    const detail = await infoResponse.text();
+    throw Object.assign(new Error(`PuLID-FLUX schema HTTP ${infoResponse.status}: ${detail.slice(0, 500)}`), { status: infoResponse.status });
+  }
+  const infoText = await infoResponse.text();
+  if (!infoText.includes("generate_image")) {
+    throw new Error("PuLID-FLUX API schema đã thay đổi: không tìm thấy endpoint generate_image.");
+  }
+
+  const uploadForm = new FormData();
+  uploadForm.append("files", new Blob([Buffer.from(source.data, "base64")], { type: source.mimeType }), "portrait.jpg");
+  const uploadResponse = await fetch(`${PULID_FLUX_SPACE}/gradio_api/upload`, {
+    method: "POST",
+    headers: authHeaders,
+    body: uploadForm,
+  });
+  if (!uploadResponse.ok) {
+    const detail = await uploadResponse.text();
+    throw Object.assign(new Error(`PuLID-FLUX upload HTTP ${uploadResponse.status}: ${detail.slice(0, 500)}`), { status: uploadResponse.status });
+  }
+  const uploaded: any = await uploadResponse.json();
+  const uploadedPath = Array.isArray(uploaded) ? uploaded[0] : uploaded?.[0] || uploaded?.path;
+  if (!uploadedPath) throw new Error("PuLID-FLUX upload không trả về đường dẫn ảnh.");
+
+  const prompt = `RAW photorealistic portrait of the exact same person in the reference photo. Preserve facial identity, age, facial proportions, hairstyle, hairline, skin tone, natural skin texture, clothing and accessories. Change only the body/arm gesture to: ${pose.prompt}. Upper-body real camera photo, natural anatomy, clean neutral background, no text, no logo, no decorative stickers.`;
+  const negativePrompt = "different person, identity drift, changed facial geometry, beauty filter, enlarged eyes, V-shaped jaw, reshaped nose, fuller lips, changed hairstyle, changed clothing, cartoon, anime, illustration, text, watermark, bad hands, extra fingers, extra limbs, blurry, low quality";
+
+  // Current official PuLID-FLUX generate_image signature:
+  // prompt, id_image, start_step, guidance, seed, true_cfg,
+  // width, height, num_steps, id_weight, neg_prompt,
+  // timestep_to_start_cfg, max_sequence_length.
+  const data = [
+    prompt,
+    { path: uploadedPath, orig_name: "portrait.jpg", meta: { _type: "gradio.FileData" } },
+    2,
+    4,
+    42 + index,
+    1,
+    896,
+    1152,
+    28,
+    1.0,
+    negativePrompt,
+    1,
+    512,
+  ];
+
+  // Use the compatibility call route supported across Gradio 5/6.
+  const callResponse = await fetch(`${PULID_FLUX_SPACE}/gradio_api/call/generate_image`, {
+    method: "POST",
+    headers: { ...authHeaders, "Content-Type": "application/json" },
+    body: JSON.stringify({ data }),
+  });
+  if (!callResponse.ok) {
+    const detail = await callResponse.text();
+    throw Object.assign(new Error(`PuLID-FLUX call HTTP ${callResponse.status}: ${detail.slice(0, 700)}`), { status: callResponse.status });
+  }
+  const callData: any = await callResponse.json();
+  if (!callData?.event_id) throw new Error("PuLID-FLUX không trả về event_id.");
+
+  const resultResponse = await fetch(
+    `${PULID_FLUX_SPACE}/gradio_api/call/generate_image/${callData.event_id}`,
+    { headers: authHeaders },
+  );
+  if (!resultResponse.ok) {
+    const detail = await resultResponse.text();
+    throw Object.assign(new Error(`PuLID-FLUX result HTTP ${resultResponse.status}: ${detail.slice(0, 700)}`), { status: resultResponse.status });
+  }
+  const eventText = await resultResponse.text();
+  const dataLines = eventText.split("\n").filter((line) => line.startsWith("data: "));
+  if (!dataLines.length) throw new Error(`PuLID-FLUX không trả về ảnh: ${eventText.slice(-700)}`);
+  const payload: any = JSON.parse(dataLines[dataLines.length - 1].slice(6));
+
+  const findImageRef = (value: any): string | null => {
+    if (!value) return null;
+    if (typeof value === "string") {
+      const lower = value.toLowerCase();
+      return value.startsWith("http://") || value.startsWith("https://") ||
+        lower.includes(".png") || lower.includes(".jpg") || lower.includes(".jpeg") || lower.includes(".webp")
+        ? value
+        : null;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const found = findImageRef(item);
+        if (found) return found;
+      }
+      return null;
+    }
+    if (typeof value === "object") {
+      if (typeof value.url === "string") return value.url;
+      if (typeof value.path === "string") return value.path;
+      for (const child of Object.values(value)) {
+        const found = findImageRef(child);
+        if (found) return found;
+      }
+    }
+    return null;
+  };
+
+  const imageRef = findImageRef(payload);
+  if (!imageRef) throw new Error(`Không đọc được ảnh PuLID-FLUX. Payload: ${JSON.stringify(payload).slice(0, 700)}`);
+  const marker = imageRef.indexOf("file=");
+  const rawPath = marker >= 0 ? imageRef.slice(marker + 5) : imageRef;
+  const candidates = [
+    ...(imageRef.startsWith("http") ? [imageRef] : []),
+    `${PULID_FLUX_SPACE}/gradio_api/file=${encodeURI(rawPath)}`,
+    `${PULID_FLUX_SPACE}/file=${encodeURI(rawPath)}`,
+  ];
+
+  let imageResponse: Response | null = null;
+  for (const candidate of [...new Set(candidates)]) {
+    const attempt = await fetch(candidate, { headers: authHeaders });
+    if (attempt.ok) {
+      imageResponse = attempt;
+      break;
+    }
+  }
+  if (!imageResponse) throw new Error(`Không tải được ảnh PuLID-FLUX. Ref: ${imageRef.slice(0, 300)}`);
+
+  const outputType = imageResponse.headers.get("content-type") || "image/png";
+  const outputBytes = Buffer.from(await imageResponse.arrayBuffer());
+  return {
+    id: `sticker_${index + 1}`,
+    title: `${pose.name} · PuLID-FLUX Fidelity`,
+    imageUrl: `data:${outputType.split(";")[0]};base64,${outputBytes.toString("base64")}`,
+    caption: pose.caption,
+  };
+}
+
 app.get("/api/health", (_req, res) => {
   res.json({
     status: "ok",
@@ -338,9 +476,11 @@ app.post("/api/generate-stickers", async (req, res) => {
         const index = next++;
         if (index >= poses.length) return;
         try {
-          results[index] = preset === "pulid_fidelity"
-            ? await generatePulidFidelity(source, poses[index], index)
-            : await generateOne(source, poses[index], index, preset);
+          results[index] = preset === "pulid_flux_fidelity"
+            ? await generatePulidFluxFidelity(source, poses[index], index)
+            : preset === "pulid_fidelity"
+              ? await generatePulidFidelity(source, poses[index], index)
+              : await generateOne(source, poses[index], index, preset);
         } catch (err: any) {
           console.error(`Sticker ${index + 1} failed:`, err?.message || err);
           if (err?.status === 400 || err?.status === 401 || err?.status === 403 || err?.status === 429) {
