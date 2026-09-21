@@ -44,20 +44,15 @@ function parseDataUrl(dataUrl: string) {
 }
 
 const INSTANTID_SPACE = "https://instantx-instantid.hf.space";
-const FACEID_SPACE = "https://multimodalart-ip-adapter-faceid.hf.space";
-const PULID_SPACE = "https://yanze-pulid.hf.space";
 
 type GenerationPreset = "instantid_balanced" | "instantid_fidelity" | "instantid_conservative" | "faceid_plus" | "pulid_fidelity" | "original_face";
-
 const INSTANTID_PRESETS = {
-  instantid_balanced: { style: "(No style)", steps: 20, identity: 1.1, adapter: 1.1, cfg: 4.5, promptMode: "balanced" },
-  instantid_fidelity: { style: "(No style)", steps: 30, identity: 1.35, adapter: 1.25, cfg: 3.5, promptMode: "fidelity" },
-  instantid_conservative: { style: "(No style)", steps: 30, identity: 1.45, adapter: 1.35, cfg: 2.5, promptMode: "conservative" },
+  instantid_balanced: { steps: 20, identity: 1.1, adapter: 1.1, cfg: 4.5 },
+  instantid_fidelity: { steps: 30, identity: 1.35, adapter: 1.25, cfg: 3.5 },
+  instantid_conservative: { steps: 30, identity: 1.45, adapter: 1.35, cfg: 2.5 },
 } as const;
 
-
-
-async function generateOne(source: { mimeType: string; data: string }, pose: typeof STICKER_POSES[number], index: number, preset: GenerationPreset) {
+async function generateOne(source: { mimeType: string; data: string }, pose: typeof STICKER_POSES[number], index: number, preset: GenerationPreset = "instantid_conservative") {
   const hfToken = process.env.HF_TOKEN;
   const authHeaders: Record<string, string> = hfToken ? { Authorization: `Bearer ${hfToken}` } : {};
 
@@ -80,54 +75,229 @@ async function generateOne(source: { mimeType: string; data: string }, pose: typ
   const uploadedPath = Array.isArray(uploaded) ? uploaded[0] : uploaded?.[0] || uploaded?.path;
   if (!uploadedPath) throw new Error("InstantID upload không trả về đường dẫn ảnh.");
 
-  const cfg = INSTANTID_PRESETS[preset as keyof typeof INSTANTID_PRESETS] || INSTANTID_PRESETS.instantid_conservative;
-  const balancedPrompt = `photorealistic messaging sticker, same person and identity, same clothing, ${pose.prompt}, upper body, natural anatomy and hands, clean white background, centered`;
-  const fidelityPrompt = `RAW photorealistic portrait photo of the EXACT SAME PERSON from the reference image. Preserve facial identity with highest priority: same facial proportions, face shape, eyes, eyelids, eyebrows, nose, lips, jawline, skin tone, age, hairstyle and hairline. Preserve the EXACT SAME clothing and accessories. Do not beautify or redesign the person. Only change the gesture to: ${pose.prompt}. Natural subtle expression, realistic skin texture, clean white background, no decorations, symbols or writing.`;
-  const conservativePrompt = `Unedited RAW photorealistic portrait of the EXACT SAME PERSON in the reference. Treat the reference face as fixed identity, not inspiration. Keep the face nearly unchanged: identical head shape, facial proportions, eye size and spacing, eyelids, eyebrows, nose width and shape, lips and mouth proportions, cheeks, jawline, chin, ears, skin tone, apparent age, hairline and hairstyle. Keep natural pores, skin texture, asymmetry and distinctive facial features. NO beautification. Keep EXACT SAME clothing and accessories. Change ONLY the arm and hand gesture to: ${pose.prompt}. Keep head angle and expression close to reference. Plain white background, no decorations, symbols or writing.`;
-  const prompt = cfg.promptMode === "balanced" ? balancedPrompt : cfg.promptMode === "fidelity" ? fidelityPrompt : conservativePrompt;
-  const negativePrompt = "different person, identity drift, changed face, face swap, altered facial geometry, enlarged eyes, doll eyes, narrowed jaw, V-shaped jaw, reshaped nose, fuller lips, beauty filter, skin smoothing, glamour retouching, excessive makeup, doll face, cartoon, anime, illustration, 3d render, changed hairstyle, changed clothing, cheek sticker, emoji, decorations, symbols, text, logo, watermark, deformed face, bad hands, extra fingers, extra limbs, blurry, low quality";
-async function callPublicGradio(space: string, endpoint: string, data: any[], authHeaders: Record<string,string>) {
-  const call = await fetch(`${space}/call/${endpoint}`, { method: "POST", headers: { ...authHeaders, "Content-Type": "application/json" }, body: JSON.stringify({ data }) });
-  if (!call.ok) throw Object.assign(new Error(`Public Space HTTP ${call.status}: ${(await call.text()).slice(0,500)}`), { status: call.status });
-  const info: any = await call.json();
-  const result = await fetch(`${space}/call/${endpoint}/${info.event_id}`, { headers: authHeaders });
-  if (!result.ok) throw Object.assign(new Error(`Public Space result HTTP ${result.status}`), { status: result.status });
-  const text = await result.text();
-  const lines = text.split("\n").filter(x => x.startsWith("data: "));
-  if (!lines.length) throw new Error(`Public Space returned no image: ${text.slice(-700)}`);
-  return JSON.parse(lines[lines.length - 1].slice(6));
+  const cfg = INSTANTID_PRESETS[preset as keyof typeof INSTANTID_PRESETS] || INSTANTID_PRESETS.instantid_conservative;\n  const prompt = `Unedited RAW photorealistic portrait of the EXACT SAME PERSON in the reference. Treat the reference face as fixed identity, not inspiration. Keep the face nearly unchanged: identical head shape, facial proportions, eye size and spacing, eyelids, eyebrows, nose width and shape, lips and mouth proportions, cheeks, jawline, chin, ears, skin tone, apparent age, hairline and hairstyle. Keep natural pores, skin texture, asymmetry and distinctive facial features. NO beautification and NO cosmetic redesign. Keep the EXACT SAME clothing and accessories from the reference. Change ONLY the arm and hand gesture to: ${pose.prompt}. Keep head angle and facial expression close to the reference, with only a subtle natural smile if needed. Real camera photo, neutral soft light, upper body, anatomically correct hand, plain clean white background, no sticker decorations, no symbols, no writing.`;
+  const negativePrompt = "different person, identity drift, changed face, face swap, altered facial geometry, enlarged eyes, doll eyes, narrowed jaw, V-shaped jaw, smaller nose, reshaped nose, fuller lips, changed mouth, changed eyebrows, changed cheeks, younger face, beauty filter, skin smoothing, airbrushed skin, porcelain skin, glamour retouching, excessive makeup, lipstick change, doll face, cartoon, anime, illustration, 3d render, stylized face, changed hairstyle, changed hairline, changed clothing, costume, red clothing, cheek sticker, face sticker, emoji, hearts, comic rays, decorations, symbols, text, letters, characters, logo, watermark, deformed face, bad hands, extra fingers, extra limbs, blurry, low quality";
+
+  // The official InstantID Space exposes this named Gradio endpoint.
+  // IdentityNet and adapter strengths are deliberately high to prioritize likeness.
+  const callResponse = await fetch(`${INSTANTID_SPACE}/call/generate_image`, {
+    method: "POST",
+    headers: { ...authHeaders, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      data: [
+        { path: uploadedPath, meta: { _type: "gradio.FileData" } },
+        null,
+        prompt,
+        negativePrompt,
+        "(No style)",
+        30,
+        1.35,
+        1.25,
+        0.0,
+        0.0,
+        [],
+        3.5,
+        42 + index,
+        "EulerDiscreteScheduler",
+        false,
+        true
+      ]
+    }),
+  });
+  if (!callResponse.ok) {
+    const detail = await callResponse.text();
+    const error: any = new Error(`InstantID call HTTP ${callResponse.status}: ${detail.slice(0, 700)}`);
+    error.status = callResponse.status;
+    throw error;
+  }
+  const callData: any = await callResponse.json();
+  if (!callData?.event_id) throw new Error("InstantID không trả về event_id.");
+
+  // Gradio returns generation results as server-sent events.
+  const resultResponse = await fetch(`${INSTANTID_SPACE}/call/generate_image/${callData.event_id}`, {
+    headers: authHeaders,
+  });
+  if (!resultResponse.ok) {
+    const detail = await resultResponse.text();
+    const error: any = new Error(`InstantID result HTTP ${resultResponse.status}: ${detail.slice(0, 700)}`);
+    error.status = resultResponse.status;
+    throw error;
+  }
+  const eventText = await resultResponse.text();
+  const dataLines = eventText.split("\n").filter(line => line.startsWith("data: "));
+  if (!dataLines.length) throw new Error(`InstantID không trả về ảnh: ${eventText.slice(-700)}`);
+  const payload: any = JSON.parse(dataLines[dataLines.length - 1].slice(6));
+
+  // Gradio versions can wrap outputs as [FileData, update], {data:[...]},
+  // or nested arrays. Find the first actual image FileData recursively.
+  const findImageRef = (value: any): string | null => {
+    if (!value) return null;
+    if (typeof value === "string") {
+      const lower = value.toLowerCase();
+      return value.startsWith("http://") ||
+        value.startsWith("https://") ||
+        lower.includes(".png") ||
+        lower.includes(".jpg") ||
+        lower.includes(".jpeg") ||
+        lower.includes(".webp")
+        ? value
+        : null;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const found = findImageRef(item);
+        if (found) return found;
+      }
+      return null;
+    }
+    if (typeof value === "object") {
+      if (typeof value.url === "string") return value.url;
+      if (typeof value.path === "string") return value.path;
+      if (value.data) {
+        const found = findImageRef(value.data);
+        if (found) return found;
+      }
+      for (const child of Object.values(value)) {
+        const found = findImageRef(child);
+        if (found) return found;
+      }
+    }
+    return null;
+  };
+
+  const imageUrl = findImageRef(payload);
+  if (!imageUrl) {
+    console.error("InstantID raw SSE tail:", eventText.slice(-2000));
+    throw new Error(`Không đọc được URL ảnh từ InstantID. Payload: ${JSON.stringify(payload).slice(0, 700)}`);
+  }
+
+  // Modern Gradio FileData often returns /gradio_api/file=<path> or a full URL.
+  // Older Spaces used /file=<path>. Try the exact reference first, then both
+  // Gradio file routes before failing.
+  const normalizeInstantIdFileRef = (ref: string): string[] => {
+    const refs: string[] = [];
+
+    // The public Space currently returns a queue-scoped URL such as
+    // /call/gen/file=/tmp/gradio/.../image.webp. That route is not a public
+    // file-serving endpoint. Extract the underlying Gradio temp path and
+    // rebuild it against the actual file endpoints.
+    const fileMarker = "file=";
+    const markerIndex = ref.indexOf(fileMarker);
+    const rawPath = markerIndex >= 0 ? ref.slice(markerIndex + fileMarker.length) : ref;
+
+    if (ref.startsWith("http")) refs.push(ref);
+    else if (ref.startsWith("/") && markerIndex < 0) refs.push(`${INSTANTID_SPACE}${ref}`);
+
+    if (rawPath) {
+      refs.push(`${INSTANTID_SPACE}/gradio_api/file=${encodeURI(rawPath)}`);
+      refs.push(`${INSTANTID_SPACE}/file=${encodeURI(rawPath)}`);
+    }
+
+    return [...new Set(refs)];
+  };
+
+  const candidates = normalizeInstantIdFileRef(imageUrl);
+
+  let imageResponse: Response | null = null;
+  let lastStatus = 0;
+  for (const candidate of candidates) {
+    const attempt = await fetch(candidate, { headers: authHeaders });
+    lastStatus = attempt.status;
+    if (attempt.ok) {
+      imageResponse = attempt;
+      break;
+    }
+  }
+  if (!imageResponse) {
+    console.error("InstantID image reference:", imageUrl);
+    throw new Error(`Không tải được ảnh InstantID (HTTP ${lastStatus}). Ref: ${imageUrl.slice(0, 300)}`);
+  }
+  const outputType = imageResponse.headers.get("content-type") || "image/png";
+  const outputBytes = Buffer.from(await imageResponse.arrayBuffer());
+
+  return {
+    id: `sticker_${index + 1}`,
+    title: pose.name,
+    imageUrl: `data:${outputType.split(";")[0]};base64,${outputBytes.toString("base64")}`,
+    caption: pose.caption,
+  };
 }
 
-async function generateExperimentalFaceProvider(source: {mimeType:string;data:string}, pose: typeof STICKER_POSES[number], index:number, preset: GenerationPreset) {
-  const hfToken = process.env.HF_TOKEN;
-  const authHeaders: Record<string,string> = hfToken ? { Authorization: `Bearer ${hfToken}` } : {};
-  const space = preset === "faceid_plus" ? FACEID_SPACE : PULID_SPACE;
-  const upload = new FormData();
-  upload.append("files", new Blob([Buffer.from(source.data,"base64")], {type:source.mimeType}), "portrait.jpg");
-  const up = await fetch(`${space}/upload`, {method:"POST",headers:authHeaders,body:upload});
-  if(!up.ok) throw Object.assign(new Error(`${preset} upload HTTP ${up.status}: ${(await up.text()).slice(0,500)}`),{status:up.status});
-  const uj:any=await up.json(); const path=Array.isArray(uj)?uj[0]:uj?.[0]||uj?.path;
-  const prompt=`photorealistic exact same person, preserve identity and clothing, ${pose.prompt}, plain white background, no text`;
-  const neg="different person, changed face, beauty filter, cartoon, text, watermark, deformed, bad hands";
-  // Public Spaces expose different Gradio signatures. Keep provider calls isolated so
-  // future endpoint changes never destroy the working InstantID presets.
-  const payload = preset === "faceid_plus"
-    ? [[{path,meta:{_type:"gradio.FileData"}}], prompt, neg, true, 1.5, 1.2, ""]
-    : [{path,meta:{_type:"gradio.FileData"}}, null, null, null, prompt, neg, 1.2, 1, 42+index, 30, 768, 768, 1.2, "fidelity", false];
-  const endpoint = preset === "faceid_plus" ? "generate_image" : "run";
-  const result:any=await callPublicGradio(space,endpoint,payload,authHeaders);
-  const find=(v:any):string|null=>{ if(!v)return null;if(typeof v==="string"&&(v.startsWith("http")||/\\.(png|jpg|jpeg|webp)/i.test(v)))return v;if(Array.isArray(v)){for(const x of v){const r=find(x);if(r)return r;}}else if(typeof v==="object"){if(typeof v.url==="string")return v.url;if(typeof v.path==="string")return v.path;for(const x of Object.values(v)){const r=find(x);if(r)return r;}}return null;};
-  const ref=find(result); if(!ref) throw new Error(`${preset} không trả về ảnh.`);
-  const marker=ref.indexOf("file="); const raw=marker>=0?ref.slice(marker+5):ref;
-  const urls=ref.startsWith("http")?[ref,`${space}/gradio_api/file=${encodeURI(raw)}`]:[`${space}/gradio_api/file=${encodeURI(raw)}`,`${space}/file=${encodeURI(raw)}`];
-  let resp:Response|null=null; for(const url of [...new Set(urls)]){const r=await fetch(url,{headers:authHeaders});if(r.ok){resp=r;break;}}
-  if(!resp) throw new Error(`${preset}: không tải được ảnh kết quả.`);
-  const bytes=Buffer.from(await resp.arrayBuffer()); const type=resp.headers.get("content-type")||"image/png";
-  return {id:`sticker_${index+1}`,title:pose.name,imageUrl:`data:${type.split(";")[0]};base64,${bytes.toString("base64")}`,caption:pose.caption};
+app.get("/api/health", (_req, res) => {
+  res.json({
+    status: "ok",
+    imageProvider: "huggingface-instantid-public-space",
+    imageModel: "InstantX/InstantID",
+    configured: true,
+    hfTokenConfigured: Boolean(process.env.HF_TOKEN),
+  });
+});
+
+app.post("/api/generate-stickers", async (req, res) => {
+  try {
+    const { image, count = 12, preset = "instantid_conservative" } = req.body as { image?: string; count?: number; preset?: GenerationPreset };
+    if (!image) return res.status(400).json({ error: "Chưa có ảnh nguồn." });
+    if (preset === "faceid_plus" || preset === "pulid_fidelity" || preset === "original_face") {
+      return res.status(501).json({ error: "Preset này đang ở chế độ thử nghiệm và chưa được kích hoạt an toàn. Hãy dùng một trong 3 preset InstantID trong lúc tích hợp provider được xác minh." });
+    }
+    // Public ZeroGPU test: exactly one sticker per request.
+    const numStickers = 1;
+    const poses = STICKER_POSES.slice(0, numStickers);
+    const source = parseDataUrl(image);
+    const results = new Array<any>(poses.length);
+    const failures: { index: number; message: string }[] = [];
+    let next = 0;
+    let fatalError: any = null;
+    const worker = async () => {
+      while (!fatalError) {
+        const index = next++;
+        if (index >= poses.length) return;
+        try {
+          results[index] = await generateOne(source, poses[index], index, preset);
+        } catch (err: any) {
+          console.error(`Sticker ${index + 1} failed:`, err?.message || err);
+          if (err?.status === 400 || err?.status === 401 || err?.status === 403 || err?.status === 429) {
+            fatalError = err;
+            return;
+          }
+          failures.push({ index, message: err?.message || "Generation failed" });
+        }
+      }
+    };
+    // Start with one request at a time: safer for free-tier capacity and prevents
+    // multiple wasted generations when the provider rejects a model/account.
+    await worker();
+
+    if (fatalError) {
+      return res.status(502).json({
+        error: `InstantID public Space lỗi: ${fatalError?.message || "unknown error"}`,
+        code: "INSTANTID_PUBLIC_SPACE_ERROR",
+      });
+    }
+
+    const stickers = results.filter(Boolean);
+    if (!stickers.length) {
+      return res.status(502).json({ error: `AI không tạo được ảnh. ${failures[0]?.message || "Kiểm tra Cloudflare Workers AI token/quota/model access."}` });
+    }
+
+    res.json({ success: true, stickers, requested: poses.length, generated: stickers.length, failures });
+  } catch (error: any) {
+    console.error("Error in /api/generate-stickers:", error);
+    res.status(500).json({ error: error?.message || "Failed to generate stickers" });
+  }
+});
+
+async function startServer() {
+  if (process.env.NODE_ENV !== "production") {
+    const vite = await createViteServer({ server: { middlewareMode: true }, appType: "spa" });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.join(process.cwd(), "dist");
+    app.use(express.static(distPath));
+    app.get("*", (_req, res) => res.sendFile(path.join(distPath, "index.html")));
+  }
+
+  app.listen(PORT, "0.0.0.0", () => console.log(`Server running on http://localhost:${PORT}`));
 }
 
-function originalFaceSticker(source:{mimeType:string;data:string}, pose:typeof STICKER_POSES[number], index:number){
-  return {id:`sticker_${index+1}`,title:`${pose.name} · Original Face`,imageUrl:`data:${source.mimeType};base64,${source.data}`,caption:pose.caption};
-}
-
-
+startServer();
