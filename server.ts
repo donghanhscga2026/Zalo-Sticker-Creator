@@ -231,7 +231,7 @@ async function generatePulidFidelity(source: { mimeType: string; data: string },
   const authHeaders: Record<string, string> = hfToken ? { Authorization: `Bearer ${hfToken}` } : {};
   const uploadForm = new FormData();
   uploadForm.append("files", new Blob([Buffer.from(source.data, "base64")], { type: source.mimeType }), "portrait.jpg");
-  const uploadResponse = await fetch(`${PULID_SPACE}/upload`, { method: "POST", headers: authHeaders, body: uploadForm });
+  const uploadResponse = await fetch(`${PULID_SPACE}/gradio_api/upload`, { method: "POST", headers: authHeaders, body: uploadForm });
   if (!uploadResponse.ok) {
     const detail = await uploadResponse.text();
     throw Object.assign(new Error(`PuLID upload HTTP ${uploadResponse.status}: ${detail.slice(0, 500)}`), { status: uploadResponse.status });
@@ -247,7 +247,7 @@ async function generatePulidFidelity(source: { mimeType: string; data: string },
     null, null, null, prompt, negativePrompt,
     1.2, 1, 42 + index, 8, 1024, 768, 1.2, "fidelity", false
   ];
-  const callResponse = await fetch(`${PULID_SPACE}/call/run`, {
+  const callResponse = await fetch(`${PULID_SPACE}/gradio_api/call/run`, {
     method: "POST",
     headers: { ...authHeaders, "Content-Type": "application/json" },
     body: JSON.stringify({ data }),
@@ -258,7 +258,7 @@ async function generatePulidFidelity(source: { mimeType: string; data: string },
   }
   const callData: any = await callResponse.json();
   if (!callData?.event_id) throw new Error("PuLID không trả về event_id.");
-  const resultResponse = await fetch(`${PULID_SPACE}/call/run/${callData.event_id}`, { headers: authHeaders });
+  const resultResponse = await fetch(`${PULID_SPACE}/gradio_api/call/run/${callData.event_id}`, { headers: authHeaders });
   if (!resultResponse.ok) throw Object.assign(new Error(`PuLID result HTTP ${resultResponse.status}`), { status: resultResponse.status });
   const eventText = await resultResponse.text();
   const dataLines = eventText.split("\n").filter((line) => line.startsWith("data: "));
