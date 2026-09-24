@@ -1,4 +1,5 @@
 import express from "express";
+import { callGradioQueue } from "./gradioQueue";
 import path from "path";
 import { createServer as createViteServer } from "vite";
 
@@ -356,7 +357,7 @@ async function generatePulidFluxFidelity(source: { mimeType: string; data: strin
   const uploadedPath = Array.isArray(uploaded) ? uploaded[0] : uploaded?.[0] || uploaded?.path;
   if (!uploadedPath) throw new Error("PuLID-FLUX upload không trả về đường dẫn ảnh.");
 
-  const prompt = `RAW photorealistic portrait of the exact same person in the reference photo. Preserve facial identity, age, facial proportions, hairstyle, hairline, skin tone, natural skin texture, clothing and accessories. Change only the body/arm gesture to: ${pose.prompt}. Upper-body real camera photo, natural anatomy, clean neutral background, no text, no logo, no decorative stickers.`;
+  const prompt = `RAW realistic sticker portrait of the exact same person as the identity reference. Preserve recognizable facial identity: face shape, eye shape and spacing, eyebrows, nose, lips, cheeks, jaw, chin, apparent age and natural skin tone. Natural skin texture, no beauty filter. Keep a gentle expression appropriate to this sticker. Change the hairstyle to a straight dark brown chin-length bob and clothing to a light blue button-up shirt. Change the pose and expression only to: ${pose.prompt}. Upper-body framing, natural anatomy, exactly two arms, clean uniform light gray background, soft even studio light. No lettering, logo, watermark or decorative rays.`;
   const negativePrompt = "different person, identity drift, changed facial geometry, beauty filter, enlarged eyes, V-shaped jaw, reshaped nose, fuller lips, changed hairstyle, changed clothing, cartoon, anime, illustration, text, watermark, bad hands, extra fingers, extra limbs, blurry, low quality";
 
   // Current official PuLID-FLUX generate_image signature:
@@ -379,58 +380,10 @@ async function generatePulidFluxFidelity(source: { mimeType: string; data: strin
     512,
   ];
 
-  // Prefer the current Gradio 6 v2 named-parameter API. If the Space is
-  // temporarily running Gradio 5, fall back to the positional compatibility
-  // route that is also supported by Gradio 6.
-  const fileData = { path: uploadedPath, orig_name: "portrait.jpg", meta: { _type: "gradio.FileData" } };
-  const v2Payload = {
-    prompt,
-    id_image: fileData,
-    start_step: 2,
-    guidance: 4,
-    seed: 42 + index,
-    true_cfg: 1,
-    width: 896,
-    height: 1152,
-    num_steps: 28,
-    id_weight: 1.0,
-    neg_prompt: negativePrompt,
-    timestep_to_start_cfg: 1,
-    max_sequence_length: 512,
-  };
-
-  let callResponse = await fetch(`${PULID_FLUX_SPACE}/gradio_api/call/v2/generate_image`, {
-    method: "POST",
-    headers: { ...authHeaders, "Content-Type": "application/json" },
-    body: JSON.stringify(v2Payload),
-  });
-
-  if (callResponse.status === 404 || callResponse.status === 405) {
-    callResponse = await fetch(`${PULID_FLUX_SPACE}/gradio_api/call/generate_image`, {
-      method: "POST",
-      headers: { ...authHeaders, "Content-Type": "application/json" },
-      body: JSON.stringify({ data }),
-    });
-  }
-
-  if (!callResponse.ok) {
-    const detail = await callResponse.text();
-    throw Object.assign(new Error(`PuLID-FLUX call HTTP ${callResponse.status}: ${detail.slice(0, 700)}`), { status: callResponse.status });
-  }
-  const callData: any = await callResponse.json();
-  if (!callData?.event_id) throw new Error("PuLID-FLUX không trả về event_id.");
-
-  const resultResponse = await fetch(
-    `${PULID_FLUX_SPACE}/gradio_api/call/generate_image/${callData.event_id}`,
-    { headers: authHeaders },
-  );
-  if (!resultResponse.ok) {
-    const detail = await resultResponse.text();
-    throw Object.assign(new Error(`PuLID-FLUX result HTTP ${resultResponse.status}: ${detail.slice(0, 700)}`), { status: resultResponse.status });
-  }
-  const eventText = await resultResponse.text();
-  const payloads = parseGradioSsePayloads(eventText);
-  if (!payloads.length) throw new Error(`PuLID-FLUX không trả về dữ liệu ảnh: ${eventText.slice(-700)}`);
+  const outputs = await callGradioQueue(PULID_FLUX_SPACE, "generate_image", data, authHeaders);
+  // Only the first output is the generated image; later outputs are debug face crops.
+  if (!outputs[0]) throw new Error("PuLID-FLUX không trả ảnh đầu ra. " + String(outputs[1] || ""));
+  const payloads = [outputs[0]];
 
   const findImageRef = (value: any): string | null => {
     if (!value) return null;
@@ -613,8 +566,8 @@ app.post("/api/generate-stickers", async (req, res) => {
     if (preset === "faceid_plus" || preset === "original_face") {
       return res.status(501).json({ error: "Preset này đang ở chế độ thử nghiệm và chưa được kích hoạt an toàn. Hãy dùng một trong 3 preset InstantID trong lúc tích hợp provider được xác minh." });
     }
-    // Public ZeroGPU test: exactly one sticker per request.
-    const numStickers = 1;
+    const requestedCount = Number.isFinite(Number(count)) ? Number(count) : 12;
+    const numStickers = Math.min(Math.max(Math.round(requestedCount), 1), STICKER_POSES.length);
     const poses = STICKER_POSES.slice(0, numStickers);
     const source = parseDataUrl(image);
     const results = new Array<any>(poses.length);
