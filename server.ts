@@ -43,6 +43,22 @@ function parseDataUrl(dataUrl: string) {
   return { mimeType: "image/jpeg", data: dataUrl };
 }
 
+function parseGradioSsePayloads(eventText: string): any[] {
+  const payloads: any[] = [];
+  for (const line of eventText.split(/\r?\n/)) {
+    if (!line.startsWith("data:")) continue;
+    const raw = line.slice(5).trim();
+    if (!raw || raw === "[DONE]") continue;
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed !== null && parsed !== undefined) payloads.push(parsed);
+    } catch {
+      // Ignore non-JSON SSE control/heartbeat data.
+    }
+  }
+  return payloads;
+}
+
 const INSTANTID_SPACE = "https://instantx-instantid.hf.space";
 const PULID_SPACE = "https://yanze-pulid.hf.space";
 const PULID_FLUX_SPACE = "https://yanze-pulid-flux.hf.space";
@@ -127,9 +143,8 @@ async function generateOne(source: { mimeType: string; data: string }, pose: typ
     throw error;
   }
   const eventText = await resultResponse.text();
-  const dataLines = eventText.split("\n").filter(line => line.startsWith("data: "));
-  if (!dataLines.length) throw new Error(`InstantID không trả về ảnh: ${eventText.slice(-700)}`);
-  const payload: any = JSON.parse(dataLines[dataLines.length - 1].slice(6));
+  const payloads = parseGradioSsePayloads(eventText);
+  if (!payloads.length) throw new Error(`InstantID không trả về dữ liệu ảnh: ${eventText.slice(-700)}`);
 
   // Gradio versions can wrap outputs as [FileData, update], {data:[...]},
   // or nested arrays. Find the first actual image FileData recursively.
@@ -168,10 +183,11 @@ async function generateOne(source: { mimeType: string; data: string }, pose: typ
     return null;
   };
 
-  const imageUrl = findImageRef(payload);
+  const payload = [...payloads].reverse().find((candidate) => Boolean(findImageRef(candidate)));
+  const imageUrl = payload ? findImageRef(payload) : null;
   if (!imageUrl) {
     console.error("InstantID raw SSE tail:", eventText.slice(-2000));
-    throw new Error(`Không đọc được URL ảnh từ InstantID. Payload: ${JSON.stringify(payload).slice(0, 700)}`);
+    throw new Error(`Không đọc được URL ảnh từ InstantID. SSE payloads: ${JSON.stringify(payloads).slice(-900)}`);
   }
 
   // Modern Gradio FileData often returns /gradio_api/file=<path> or a full URL.
@@ -262,9 +278,8 @@ async function generatePulidFidelity(source: { mimeType: string; data: string },
   const resultResponse = await fetch(`${PULID_SPACE}/gradio_api/call/run/${callData.event_id}`, { headers: authHeaders });
   if (!resultResponse.ok) throw Object.assign(new Error(`PuLID result HTTP ${resultResponse.status}`), { status: resultResponse.status });
   const eventText = await resultResponse.text();
-  const dataLines = eventText.split("\n").filter((line) => line.startsWith("data: "));
-  if (!dataLines.length) throw new Error(`PuLID không trả về ảnh: ${eventText.slice(-700)}`);
-  const payload: any = JSON.parse(dataLines[dataLines.length - 1].slice(6));
+  const payloads = parseGradioSsePayloads(eventText);
+  if (!payloads.length) throw new Error(`PuLID không trả về dữ liệu ảnh: ${eventText.slice(-700)}`);
 
   const findImageRef = (value: any): string | null => {
     if (!value) return null;
@@ -284,8 +299,9 @@ async function generatePulidFidelity(source: { mimeType: string; data: string },
     }
     return null;
   };
-  const imageRef = findImageRef(payload);
-  if (!imageRef) throw new Error(`Không đọc được ảnh PuLID. Payload: ${JSON.stringify(payload).slice(0, 700)}`);
+  const payload = [...payloads].reverse().find((candidate) => Boolean(findImageRef(candidate)));
+  const imageRef = payload ? findImageRef(payload) : null;
+  if (!imageRef) throw new Error(`Không đọc được ảnh PuLID. SSE payloads: ${JSON.stringify(payloads).slice(-900)}`);
   const marker = imageRef.indexOf("file=");
   const rawPath = marker >= 0 ? imageRef.slice(marker + 5) : imageRef;
   const candidates = [
@@ -413,9 +429,8 @@ async function generatePulidFluxFidelity(source: { mimeType: string; data: strin
     throw Object.assign(new Error(`PuLID-FLUX result HTTP ${resultResponse.status}: ${detail.slice(0, 700)}`), { status: resultResponse.status });
   }
   const eventText = await resultResponse.text();
-  const dataLines = eventText.split("\n").filter((line) => line.startsWith("data: "));
-  if (!dataLines.length) throw new Error(`PuLID-FLUX không trả về ảnh: ${eventText.slice(-700)}`);
-  const payload: any = JSON.parse(dataLines[dataLines.length - 1].slice(6));
+  const payloads = parseGradioSsePayloads(eventText);
+  if (!payloads.length) throw new Error(`PuLID-FLUX không trả về dữ liệu ảnh: ${eventText.slice(-700)}`);
 
   const findImageRef = (value: any): string | null => {
     if (!value) return null;
@@ -444,8 +459,9 @@ async function generatePulidFluxFidelity(source: { mimeType: string; data: strin
     return null;
   };
 
-  const imageRef = findImageRef(payload);
-  if (!imageRef) throw new Error(`Không đọc được ảnh PuLID-FLUX. Payload: ${JSON.stringify(payload).slice(0, 700)}`);
+  const payload = [...payloads].reverse().find((candidate) => Boolean(findImageRef(candidate)));
+  const imageRef = payload ? findImageRef(payload) : null;
+  if (!imageRef) throw new Error(`Không đọc được ảnh PuLID-FLUX. SSE payloads: ${JSON.stringify(payloads).slice(-900)}`);
   const marker = imageRef.indexOf("file=");
   const rawPath = marker >= 0 ? imageRef.slice(marker + 5) : imageRef;
   const candidates = [
