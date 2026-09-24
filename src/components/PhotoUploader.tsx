@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { Upload, Sparkles, Check, AlertCircle, RefreshCw } from "lucide-react";
 import { GenerationPresetId } from "../types";
 
@@ -46,8 +46,19 @@ export const PhotoUploader: React.FC<PhotoUploaderProps> = ({ onGenerate, onComp
   const [error, setError] = useState<string | null>(null);
   const [hfToken, setHfToken] = useState("");
   const [tokenMessage, setTokenMessage] = useState<string | null>(null);
+  const [tokenBusy, setTokenBusy] = useState(false);
+  const checkToken = async () => {
+    setTokenBusy(true);
+    try {
+      const data = await (await fetch("/api/config/hf-token", { cache: "no-store" })).json();
+      setTokenMessage(data.account ? `Đang dùng tài khoản HF: ${data.account}. Nguồn: ${data.source === "saved-file" ? "token đã lưu" : "Secrets / môi trường"}. Đăng nhập hợp lệ không có nghĩa còn quota GPU.` : data.error || "Chưa cấu hình token HF.");
+    } catch { setTokenMessage("Không kết nối được backend để kiểm tra token."); }
+    finally { setTokenBusy(false); }
+  };
+  useEffect(() => { void checkToken(); }, []);
 
   const saveHfToken = async () => {
+    setTokenBusy(true);
     setTokenMessage(null);
     try {
       const response = await fetch("/api/config/hf-token", {
@@ -58,10 +69,10 @@ export const PhotoUploader: React.FC<PhotoUploaderProps> = ({ onGenerate, onComp
       const data = await response.json();
       if (!response.ok) throw new Error(data?.error || "Không thể lưu token.");
       setHfToken("");
-      setTokenMessage("Đã lưu token vào HF_TOKEN.env. Token không hiển thị lại.");
+      setTokenMessage(`Đã xác minh và lưu tài khoản HF: ${data.account}. Áp dụng cho lượt tiếp theo và tự nạp lại khi backend restart nếu file vẫn tồn tại.`);
     } catch (saveError) {
       setTokenMessage(saveError instanceof Error ? saveError.message : "Không thể lưu token.");
-    }
+    } finally { setTokenBusy(false); }
   };
 
   const readImage = (file?: File) => {
@@ -134,9 +145,10 @@ export const PhotoUploader: React.FC<PhotoUploaderProps> = ({ onGenerate, onComp
           <label className="block text-sm font-semibold text-slate-800 mb-2">Hugging Face token</label>
           <div className="flex gap-2">
             <input type="password" value={hfToken} onChange={(event) => setHfToken(event.target.value)} placeholder="hf_..." autoComplete="off" className="min-w-0 flex-1 rounded-xl border border-amber-300 bg-white px-3 py-2 text-sm" />
-            <button type="button" onClick={saveHfToken} disabled={!hfToken.trim()} className="rounded-xl bg-slate-800 px-4 py-2 text-sm font-semibold text-white disabled:opacity-40">Lưu</button>
+            <button type="button" onClick={saveHfToken} disabled={!hfToken.trim() || tokenBusy || isLoading} className="rounded-xl bg-slate-800 px-4 py-2 text-sm font-semibold text-white disabled:opacity-40">{tokenBusy ? "Đang kiểm tra…" : "Lưu"}</button>
           </div>
-          <p className="mt-2 text-xs text-amber-800">Chỉ lưu cục bộ vào HF_TOKEN.env; không hiển thị lại và không đưa vào log.</p>
+          <p className="mt-2 text-xs text-amber-800">Token lưu ở backend, không lưu trong trình duyệt. Trong AI Studio, dùng Secrets nếu môi trường bị tạo lại.</p>
+          <button type="button" disabled={tokenBusy} onClick={checkToken} className="mt-2 text-sm underline">Kiểm tra tài khoản đang dùng</button>
           {tokenMessage && <p className="mt-2 text-xs text-slate-700">{tokenMessage}</p>}
         </div>
         <div className="grid grid-cols-2 gap-2 p-1 bg-slate-100 rounded-2xl">
