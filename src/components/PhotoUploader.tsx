@@ -1,84 +1,30 @@
-import React, { useState, useEffect } from "react";
+import React, { useState } from "react";
 import { Upload, Sparkles, Check, AlertCircle, RefreshCw } from "lucide-react";
-import { GenerationPresetId } from "../types";
 
 interface PhotoUploaderProps {
-  onGenerate: (image: string, count: number, packName: string, preset: string) => void;
-  onCompare: (image: string, packName: string, poseIndex: number, presets: GenerationPresetId[]) => void;
+  onGenerate: (image: string, count: number, packName: string, style: string) => void;
   isLoading: boolean;
 }
 
-const COMPARE_PRESETS: { id: GenerationPresetId; label: string }[] = [
-  { id: "instantid_balanced", label: "InstantID — Cân bằng" },
-  { id: "instantid_fidelity", label: "InstantID — Giữ mặt cao" },
-  { id: "instantid_conservative", label: "InstantID — Bảo thủ / giữ mặt tối đa" },
-  { id: "pulid_fidelity", label: "PuLID SDXL Fidelity" },
-  { id: "pulid_flux_fidelity", label: "PuLID-FLUX v0.9.1 / Krea" },
+const COUNT_OPTIONS = [9, 12, 15];
+const STYLE_OPTIONS = [
+  { id: "photo_real", label: "Ảnh thật", description: "Ưu tiên giữ khuôn mặt và chất ảnh tự nhiên." },
+  { id: "cute_soft", label: "Cute nhẹ", description: "Dễ thương hơn nhưng vẫn giữ nhận diện khuôn mặt." },
+  { id: "sticker_clean", label: "Sticker rõ nét", description: "Bố cục sạch, viền chủ thể rõ, hợp dùng làm sticker." },
 ];
 
-const TEST_POSES = [
-  "Thumbs Up / OK",
-  "Finger Heart / Yêu",
-  "Cute Cheeks / Hihi",
-  "Cool / Sunglasses",
-  "Thinking / Hmm",
-  "Surprised / Ôi",
-  "Coffee / Chill",
-  "Laughing / Haha",
-  "Salute / Roài",
-  "Double Hearts / Muaah",
-  "Look Back / Đẹp",
-  "Big Heart / Love",
-  "Fighting / Cố lên",
-  "Shy / Ái chà",
-  "Hello / Vẫy tay",
-];
-
-export const PhotoUploader: React.FC<PhotoUploaderProps> = ({ onGenerate, onCompare, isLoading }) => {
+export const PhotoUploader: React.FC<PhotoUploaderProps> = ({ onGenerate, isLoading }) => {
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
   const [stickerCount, setStickerCount] = useState<number>(12);
-  const [packName, setPackName] = useState<string>("Bộ Sticker Đáng Yêu");
-  const [dragOver, setDragOver] = useState<boolean>(false);
-  const [generationPreset, setGenerationPreset] = useState<string>("pulid_flux_fidelity");
-  const [mode, setMode] = useState<"generate" | "compare">("compare");
-  const [poseIndex, setPoseIndex] = useState<number>(0);
-  const [comparePresets, setComparePresets] = useState<GenerationPresetId[]>(COMPARE_PRESETS.map((item) => item.id));
+  const [packName, setPackName] = useState<string>("Bộ Sticker Của Tôi");
+  const [style, setStyle] = useState<string>("photo_real");
+  const [dragOver, setDragOver] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [hfToken, setHfToken] = useState("");
-  const [tokenMessage, setTokenMessage] = useState<string | null>(null);
-  const [tokenBusy, setTokenBusy] = useState(false);
-  const checkToken = async () => {
-    setTokenBusy(true);
-    try {
-      const data = await (await fetch("/api/config/hf-token", { cache: "no-store" })).json();
-      setTokenMessage(data.account ? `Đang dùng tài khoản HF: ${data.account}. Nguồn: ${data.source === "saved-file" ? "token đã lưu" : "Secrets / môi trường"}. Đăng nhập hợp lệ không có nghĩa còn quota GPU.` : data.error || "Chưa cấu hình token HF.");
-    } catch { setTokenMessage("Không kết nối được backend để kiểm tra token."); }
-    finally { setTokenBusy(false); }
-  };
-  useEffect(() => { void checkToken(); }, []);
-
-  const saveHfToken = async () => {
-    setTokenBusy(true);
-    setTokenMessage(null);
-    try {
-      const response = await fetch("/api/config/hf-token", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token: hfToken }),
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data?.error || "Không thể lưu token.");
-      setHfToken("");
-      setTokenMessage(`Đã xác minh và lưu tài khoản HF: ${data.account}. Áp dụng cho lượt tiếp theo và tự nạp lại khi backend restart nếu file vẫn tồn tại.`);
-    } catch (saveError) {
-      setTokenMessage(saveError instanceof Error ? saveError.message : "Không thể lưu token.");
-    } finally { setTokenBusy(false); }
-  };
 
   const readImage = (file?: File) => {
     if (!file) return;
     if (!file.type.startsWith("image/")) {
-      setError("Vui lòng tải lên tệp hình ảnh hợp lệ (PNG, JPG, WEBP)");
+      setError("Vui lòng tải lên ảnh PNG, JPG hoặc WEBP.");
       return;
     }
     setError(null);
@@ -87,42 +33,13 @@ export const PhotoUploader: React.FC<PhotoUploaderProps> = ({ onGenerate, onComp
     reader.readAsDataURL(file);
   };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => readImage(e.target.files?.[0]);
-
-  const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    setDragOver(false);
-    readImage(e.dataTransfer.files?.[0]);
-  };
-
-  const toggleComparePreset = (preset: GenerationPresetId) => {
-    setComparePresets((current) =>
-      current.includes(preset) ? current.filter((item) => item !== preset) : [...current, preset]
-    );
-  };
-
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSubmit = (event: React.FormEvent) => {
+    event.preventDefault();
     if (!selectedImage) {
-      setError("Vui lòng tải lên ảnh cá nhân của bạn trước");
+      setError("Hãy tải lên một ảnh chân dung trước.");
       return;
     }
-
-    if (mode === "compare") {
-      if (!comparePresets.length) {
-        setError("Hãy chọn ít nhất 1 preset để so sánh.");
-        return;
-      }
-      onCompare(selectedImage, packName || "Bộ Sticker Của Tôi", poseIndex, comparePresets);
-      return;
-    }
-
-    onGenerate(selectedImage, stickerCount, packName || "Bộ Sticker Của Tôi", generationPreset);
-  };
-
-  const handleUseDemo = () => {
-    setSelectedImage("https://images.unsplash.com/photo-1534528741775-53994a69daeb?q=80&w=600&auto=format&fit=crop");
-    setPackName("Cô Gái Dễ Thương");
+    onGenerate(selectedImage, stickerCount, packName.trim() || "Bộ Sticker Của Tôi", style);
   };
 
   return (
@@ -130,187 +47,101 @@ export const PhotoUploader: React.FC<PhotoUploaderProps> = ({ onGenerate, onComp
       <div className="text-center mb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-50 text-blue-700 text-xs font-semibold mb-3 border border-blue-200/60">
           <Sparkles className="w-3.5 h-3.5" />
-          <span>Zalo Sticker Creator · Compare Lab</span>
+          <span>Zalo Sticker Creator Lite</span>
         </div>
-        <h2 className="text-3xl font-extrabold text-slate-900 tracking-tight sm:text-4xl">
-          So sánh AI trước khi tạo cả bộ sticker
+        <h2 className="text-3xl sm:text-4xl font-extrabold text-slate-900 tracking-tight">
+          Một ảnh gốc → cả bộ sticker
         </h2>
         <p className="mt-3 text-base text-slate-600 max-w-2xl mx-auto">
-          Dùng cùng một ảnh gốc và cùng một pose để nhìn trực tiếp preset nào giữ khuôn mặt tốt nhất.
+          Tải ảnh chân dung, chọn số lượng và phong cách. Hệ thống sẽ tạo lần lượt các biểu cảm và giữ lại từng ảnh đã hoàn thành.
         </p>
       </div>
 
       <form onSubmit={handleSubmit} className="bg-white rounded-3xl shadow-xl shadow-slate-100 border border-slate-200/80 p-6 sm:p-8 space-y-6">
-        <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
-          <label className="block text-sm font-semibold text-slate-800 mb-2">Hugging Face token</label>
-          <div className="flex gap-2">
-            <input type="password" value={hfToken} onChange={(event) => setHfToken(event.target.value)} placeholder="hf_..." autoComplete="off" className="min-w-0 flex-1 rounded-xl border border-amber-300 bg-white px-3 py-2 text-sm" />
-            <button type="button" onClick={saveHfToken} disabled={!hfToken.trim() || tokenBusy || isLoading} className="rounded-xl bg-slate-800 px-4 py-2 text-sm font-semibold text-white disabled:opacity-40">{tokenBusy ? "Đang kiểm tra…" : "Lưu"}</button>
-          </div>
-          <p className="mt-2 text-xs text-amber-800">Token lưu ở backend, không lưu trong trình duyệt. Trong AI Studio, dùng Secrets nếu môi trường bị tạo lại.</p>
-          <button type="button" disabled={tokenBusy} onClick={checkToken} className="mt-2 text-sm underline">Kiểm tra tài khoản đang dùng</button>
-          {tokenMessage && <p className="mt-2 text-xs text-slate-700">{tokenMessage}</p>}
-        </div>
-        <div className="grid grid-cols-2 gap-2 p-1 bg-slate-100 rounded-2xl">
-          <button
-            type="button"
-            onClick={() => setMode("compare")}
-            className={`px-4 py-3 rounded-xl text-sm font-bold transition-all ${mode === "compare" ? "bg-white text-blue-700 shadow-sm" : "text-slate-600"}`}
-          >
-            So sánh preset
-          </button>
-          <button
-            type="button"
-            onClick={() => setMode("generate")}
-            className={`px-4 py-3 rounded-xl text-sm font-bold transition-all ${mode === "generate" ? "bg-white text-blue-700 shadow-sm" : "text-slate-600"}`}
-          >
-            Tạo sticker
-          </button>
-        </div>
-
         <div>
           <label className="block text-sm font-semibold text-slate-700 mb-2">Tên bộ sticker</label>
           <input
-            type="text"
             value={packName}
             onChange={(e) => setPackName(e.target.value)}
+            className="w-full px-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none"
             placeholder="Ví dụ: Bộ Sticker Của Tôi"
-            className="w-full px-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-slate-800 text-sm outline-none"
-            required
           />
         </div>
 
-        {mode === "compare" ? (
-          <div className="space-y-5 rounded-2xl border border-blue-100 bg-blue-50/40 p-5">
-            <div>
-              <label className="block text-sm font-semibold text-slate-700 mb-2">Pose dùng để test đồng loạt</label>
-              <select
-                value={poseIndex}
-                onChange={(e) => setPoseIndex(Number(e.target.value))}
-                className="w-full px-4 py-3 rounded-xl border border-slate-300 bg-white text-sm"
+        <div>
+          <label className="block text-sm font-semibold text-slate-700 mb-3">Số lượng sticker</label>
+          <div className="grid grid-cols-3 gap-3">
+            {COUNT_OPTIONS.map((count) => (
+              <button
+                key={count}
+                type="button"
+                onClick={() => setStickerCount(count)}
+                className={`rounded-xl border px-4 py-3 text-sm font-bold transition-all ${
+                  stickerCount === count ? "border-blue-600 bg-blue-50 text-blue-700" : "border-slate-200 bg-white text-slate-700"
+                }`}
               >
-                {TEST_POSES.map((pose, index) => (
-                  <option key={pose} value={index}>{index + 1}. {pose}</option>
-                ))}
-              </select>
-            </div>
+                {count} ảnh
+              </button>
+            ))}
+          </div>
+        </div>
 
-            <div>
-              <div className="flex items-center justify-between gap-3 mb-3">
-                <label className="text-sm font-semibold text-slate-700">Preset sẽ chạy</label>
-                <span className="text-xs font-semibold text-blue-700">{comparePresets.length}/{COMPARE_PRESETS.length} preset</span>
-              </div>
-              <div className="grid sm:grid-cols-2 gap-2">
-                {COMPARE_PRESETS.map((preset) => (
-                  <label key={preset.id} className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white px-3 py-3 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={comparePresets.includes(preset.id)}
-                      onChange={() => toggleComparePreset(preset.id)}
-                      className="h-4 w-4 accent-blue-600"
-                    />
-                    <span className="text-sm text-slate-700">{preset.label}</span>
-                  </label>
-                ))}
-              </div>
-              <p className="mt-3 text-xs text-slate-500">
-                Hệ thống chạy tuần tự để giảm rate limit/ZeroGPU. Một preset lỗi sẽ không làm mất kết quả của các preset khác.
-              </p>
-            </div>
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-            <div>
-              <label className="block text-sm font-semibold text-slate-700 mb-2">AI engine / preset</label>
-              <select
-                value={generationPreset}
-                onChange={(e) => setGenerationPreset(e.target.value)}
-                className="w-full px-4 py-3 rounded-xl border border-slate-300 bg-white text-sm"
+        <div>
+          <label className="block text-sm font-semibold text-slate-700 mb-3">Phong cách</label>
+          <div className="grid sm:grid-cols-3 gap-3">
+            {STYLE_OPTIONS.map((option) => (
+              <button
+                key={option.id}
+                type="button"
+                onClick={() => setStyle(option.id)}
+                className={`text-left rounded-2xl border p-4 transition-all ${
+                  style === option.id ? "border-blue-600 bg-blue-50" : "border-slate-200 bg-white"
+                }`}
               >
-                <option value="pulid_flux_fidelity">PuLID-FLUX — Giữ mặt / đổi pose</option>
-                <option value="instantid_balanced">InstantID — Cân bằng</option>
-                <option value="instantid_fidelity">InstantID — Giữ mặt cao</option>
-                <option value="instantid_conservative">InstantID — Bảo thủ / giữ mặt tối đa</option>
-                <option value="faceid_plus">IP-Adapter FaceID Plus — thử nghiệm</option>
-                <option value="pulid_fidelity">PuLID SDXL Fidelity</option>
-                <option value="original_face">Giữ mặt gốc — chưa kích hoạt</option>
-              </select>
-            </div>
-            <div>
-              <div className="flex justify-between items-center mb-2">
-                <label className="text-sm font-semibold text-slate-700">Số lượng sticker ({stickerCount} ảnh)</label>
-                <span className="text-xs text-slate-500">9–15</span>
-              </div>
-              <input
-                type="range"
-                min="9"
-                max="15"
-                step="1"
-                value={stickerCount}
-                onChange={(e) => setStickerCount(Number(e.target.value))}
-                className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
-              />
-            </div>
+                <div className="font-bold text-sm text-slate-900">{option.label}</div>
+                <div className="mt-1 text-xs text-slate-500">{option.description}</div>
+              </button>
+            ))}
           </div>
-        )}
+        </div>
 
         <div>
           <label className="block text-sm font-semibold text-slate-700 mb-2">Ảnh chân dung gốc</label>
           <div
             onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
             onDragLeave={() => setDragOver(false)}
-            onDrop={handleDrop}
-            className={`border-2 border-dashed rounded-2xl p-6 sm:p-8 text-center transition-all relative overflow-hidden group ${
-              dragOver
-                ? "border-blue-500 bg-blue-50/50"
-                : selectedImage
-                  ? "border-emerald-300 bg-emerald-50/20"
-                  : "border-slate-300 hover:border-slate-400 bg-slate-50/50"
+            onDrop={(e) => { e.preventDefault(); setDragOver(false); readImage(e.dataTransfer.files?.[0]); }}
+            className={`border-2 border-dashed rounded-2xl p-6 sm:p-8 text-center transition-all ${
+              dragOver ? "border-blue-500 bg-blue-50" : selectedImage ? "border-emerald-300 bg-emerald-50/30" : "border-slate-300 bg-slate-50/50"
             }`}
           >
             {selectedImage ? (
-              <div className="flex flex-col sm:flex-row items-center justify-center gap-6">
-                <div className="relative w-36 h-36 rounded-2xl overflow-hidden shadow-md border-4 border-white bg-white">
-                  <img src={selectedImage} alt="Ảnh gốc" className="w-full h-full object-cover" referrerPolicy="no-referrer" />
-                </div>
-                <div className="text-left space-y-2">
-                  <div className="flex items-center gap-1.5 text-emerald-700 font-semibold text-sm">
-                    <Check className="w-4 h-4" />
-                    <span>Ảnh gốc đã sẵn sàng</span>
+              <div className="flex flex-col sm:flex-row items-center justify-center gap-5">
+                <img src={selectedImage} alt="Ảnh gốc" className="w-40 h-40 object-cover rounded-2xl border-4 border-white shadow-md" />
+                <div className="text-left">
+                  <div className="flex items-center gap-2 text-emerald-700 font-semibold text-sm">
+                    <Check className="w-4 h-4" /> Ảnh đã sẵn sàng
                   </div>
-                  <p className="text-xs text-slate-500">
-                    {mode === "compare"
-                      ? `Sẽ tạo ${comparePresets.length} phiên bản từ cùng ảnh và cùng pose để so sánh.`
-                      : `Sẵn sàng tạo sticker bằng preset đã chọn.`}
-                  </p>
-                  <label className="inline-block mt-2 cursor-pointer text-xs font-medium text-blue-600 underline">
-                    Tải ảnh khác
-                    <input type="file" accept="image/*" onChange={handleFileChange} className="hidden" />
+                  <p className="mt-2 text-xs text-slate-500">Nên dùng ảnh rõ mặt, ánh sáng tốt, không che mắt hoặc khuôn mặt.</p>
+                  <label className="inline-block mt-3 text-sm text-blue-600 underline cursor-pointer">
+                    Chọn ảnh khác
+                    <input type="file" accept="image/*" className="hidden" onChange={(e) => readImage(e.target.files?.[0])} />
                   </label>
                 </div>
               </div>
             ) : (
-              <div className="space-y-4">
+              <div className="space-y-3">
                 <div className="w-16 h-16 mx-auto rounded-full bg-blue-100 flex items-center justify-center text-blue-600">
                   <Upload className="w-7 h-7" />
                 </div>
-                <div>
-                  <p className="text-sm font-semibold text-slate-800">
-                    Kéo thả ảnh vào đây, hoặc{" "}
-                    <label className="text-blue-600 cursor-pointer underline">
-                      chọn tệp
-                      <input type="file" accept="image/*" onChange={handleFileChange} className="hidden" />
-                    </label>
-                  </p>
-                  <p className="text-xs text-slate-500 mt-1">PNG, JPG, WEBP · nên dùng ảnh rõ mặt.</p>
-                </div>
-                <button
-                  type="button"
-                  onClick={handleUseDemo}
-                  className="text-xs font-medium text-slate-600 bg-white border border-slate-300 px-3 py-1.5 rounded-lg hover:bg-slate-100"
-                >
-                  Dùng ảnh mẫu để thử
-                </button>
+                <p className="text-sm font-semibold text-slate-800">
+                  Kéo thả ảnh vào đây hoặc{" "}
+                  <label className="text-blue-600 underline cursor-pointer">
+                    chọn tệp
+                    <input type="file" accept="image/*" className="hidden" onChange={(e) => readImage(e.target.files?.[0])} />
+                  </label>
+                </p>
+                <p className="text-xs text-slate-500">PNG, JPG, WEBP · ưu tiên ảnh chân dung rõ nét.</p>
               </div>
             )}
           </div>
@@ -325,24 +156,10 @@ export const PhotoUploader: React.FC<PhotoUploaderProps> = ({ onGenerate, onComp
 
         <button
           type="submit"
-          disabled={isLoading || !selectedImage || (mode === "compare" && !comparePresets.length)}
-          className={`w-full py-4 px-6 rounded-2xl font-bold text-white shadow-lg flex items-center justify-center gap-2 transition-all ${
-            isLoading || !selectedImage || (mode === "compare" && !comparePresets.length)
-              ? "bg-slate-300 cursor-not-allowed shadow-none"
-              : "bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 shadow-blue-500/25 active:scale-[0.99]"
-          }`}
+          disabled={isLoading || !selectedImage}
+          className="w-full py-4 rounded-2xl font-bold text-white bg-gradient-to-r from-blue-600 to-indigo-600 disabled:from-slate-300 disabled:to-slate-300 shadow-lg flex items-center justify-center gap-2"
         >
-          {isLoading ? (
-            <>
-              <RefreshCw className="w-5 h-5 animate-spin" />
-              <span>{mode === "compare" ? "Đang chạy lần lượt các preset..." : "Đang tạo sticker..."}</span>
-            </>
-          ) : (
-            <>
-              <Sparkles className="w-5 h-5" />
-              <span>{mode === "compare" ? `So sánh ${comparePresets.length} preset ngay` : `Bắt đầu tạo ${stickerCount} sticker`}</span>
-            </>
-          )}
+          {isLoading ? <><RefreshCw className="w-5 h-5 animate-spin" /> Đang tạo sticker...</> : <><Sparkles className="w-5 h-5" /> Tạo {stickerCount} sticker</>}
         </button>
       </form>
     </div>
