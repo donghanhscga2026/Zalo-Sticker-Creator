@@ -357,7 +357,7 @@ async function generatePulidFluxFidelity(source: { mimeType: string; data: strin
   const uploadedPath = Array.isArray(uploaded) ? uploaded[0] : uploaded?.[0] || uploaded?.path;
   if (!uploadedPath) throw new Error("PuLID-FLUX upload không trả về đường dẫn ảnh.");
 
-  const prompt = `RAW photorealistic portrait of the exact same person in the reference photo. Preserve facial identity, age, facial proportions, hairstyle, hairline, skin tone, natural skin texture, clothing and accessories. Change only the body/arm gesture to: ${pose.prompt}. Upper-body real camera photo, natural anatomy, clean neutral background, no text, no logo, no decorative stickers.`;
+  const prompt = `RAW realistic sticker portrait of the exact same person as the identity reference. Preserve recognizable facial identity: face shape, eye shape and spacing, eyebrows, nose, lips, cheeks, jaw, chin, apparent age and natural skin tone. Natural skin texture, no beauty filter. Keep a gentle expression appropriate to this sticker. Change the hairstyle to a straight dark brown chin-length bob and clothing to a light blue button-up shirt. Change the pose and expression only to: ${pose.prompt}. Upper-body framing, natural anatomy, exactly two arms, clean uniform light gray background, soft even studio light. No lettering, logo, watermark or decorative rays.`;
   const negativePrompt = "different person, identity drift, changed facial geometry, beauty filter, enlarged eyes, V-shaped jaw, reshaped nose, fuller lips, changed hairstyle, changed clothing, cartoon, anime, illustration, text, watermark, bad hands, extra fingers, extra limbs, blurry, low quality";
 
   // Current official PuLID-FLUX generate_image signature:
@@ -566,8 +566,8 @@ app.post("/api/generate-stickers", async (req, res) => {
     if (preset === "faceid_plus" || preset === "original_face") {
       return res.status(501).json({ error: "Preset này đang ở chế độ thử nghiệm và chưa được kích hoạt an toàn. Hãy dùng một trong 3 preset InstantID trong lúc tích hợp provider được xác minh." });
     }
-    // Public ZeroGPU test: exactly one sticker per request.
-    const numStickers = 1;
+    const requestedCount = Number.isFinite(Number(count)) ? Number(count) : 12;
+    const numStickers = Math.min(Math.max(Math.round(requestedCount), 1), STICKER_POSES.length);
     const poses = STICKER_POSES.slice(0, numStickers);
     const source = parseDataUrl(image);
     const results = new Array<any>(poses.length);

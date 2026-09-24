@@ -187,12 +187,12 @@ export const PhotoUploader: React.FC<PhotoUploaderProps> = ({ onGenerate, onComp
                 onChange={(e) => setGenerationPreset(e.target.value)}
                 className="w-full px-4 py-3 rounded-xl border border-slate-300 bg-white text-sm"
               >
+                <option value="pulid_flux_fidelity">PuLID-FLUX — Giữ mặt / đổi pose</option>
                 <option value="instantid_balanced">InstantID — Cân bằng</option>
                 <option value="instantid_fidelity">InstantID — Giữ mặt cao</option>
                 <option value="instantid_conservative">InstantID — Bảo thủ / giữ mặt tối đa</option>
                 <option value="faceid_plus">IP-Adapter FaceID Plus — thử nghiệm</option>
                 <option value="pulid_fidelity">PuLID SDXL Fidelity</option>
-                <option value="pulid_flux_fidelity">PuLID-FLUX v0.9.1 / Krea</option>
                 <option value="original_face">Giữ mặt gốc — chưa kích hoạt</option>
               </select>
             </div>
