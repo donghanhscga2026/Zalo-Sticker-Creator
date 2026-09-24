@@ -6,6 +6,7 @@ import { CompareResults } from "./components/CompareResults";
 import { LibraryModal } from "./components/LibraryModal";
 import { ZaloGuideModal } from "./components/ZaloGuideModal";
 import { CompareResponse, GenerationPresetId, Sticker, StickerPack } from "./types";
+import { draftStorage, GenerationDraft } from "./lib/generationDraft";
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<"create" | "editor" | "compare" | "library">("create");
@@ -15,6 +16,15 @@ export default function App() {
   const [compareData, setCompareData] = useState<CompareResponse | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [showZaloGuide, setShowZaloGuide] = useState<boolean>(false);
+  const [draft, setDraft] = useState<GenerationDraft | null>(null);
+  const [generationMessage, setGenerationMessage] = useState("");
+  const [draftReady, setDraftReady] = useState(false);
+
+  useEffect(() => {
+    draftStorage().then(saved => { if (saved) { setDraft(saved); setCurrentStickers(saved.stickers); setCurrentPackName(saved.packName); } })
+      .catch(() => setGenerationMessage("Không đọc được bản đang tạo từ trình duyệt."))
+      .finally(() => setDraftReady(true));
+  }, []);
 
   useEffect(() => {
     try {
@@ -55,13 +65,25 @@ export default function App() {
   };
 
   const handleGenerateStickers = async (image: string, count: number, packName: string, preset: string) => {
+    await runDraft({ image, count, packName, preset, stickers: [], completed: [] });
+  };
+
+  const runDraft = async (initial: GenerationDraft) => {
+    if (isLoading) return;
     setIsLoading(true);
-    setCurrentPackName(packName);
+    setCurrentPackName(initial.packName);
+    let next = { ...initial, stickers: [...initial.stickers], completed: [...initial.completed] };
+    setDraft(next);
+    setCurrentStickers(next.stickers);
     try {
+      await draftStorage(next);
+      for (let index = 0; index < next.count; index++) {
+      if (next.completed.includes(index)) continue;
+      setGenerationMessage(`Đang tạo ảnh ${index + 1}/${next.count}. Đã lưu ${next.stickers.length} ảnh.`);
       const response = await fetch("/api/generate-stickers", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image, count, preset }),
+        body: JSON.stringify({ image: next.image, count: next.count, preset: next.preset, poseIndices: [index] }),
       });
       const data = await readApiResponse(response);
       if (!response.ok) throw new Error(data?.error || `Không thể tạo sticker bằng AI (HTTP ${response.status})`);
@@ -69,11 +91,15 @@ export default function App() {
       const stickers = data?.stickers as Sticker[] | undefined;
       if (!stickers?.length) throw new Error("AI không trả về sticker nào");
 
-      setCurrentStickers(stickers);
-      setActiveTab("editor");
+      next = { ...next, stickers: [...next.stickers, ...stickers], completed: [...next.completed, index] };
+      setDraft(next);
+      setCurrentStickers(next.stickers);
+      try { await draftStorage(next); }
+      catch { throw new Error("Trình duyệt không lưu được ảnh. Ảnh hiện vẫn có trên màn hình; hãy mở và tải ảnh trước khi đóng trang."); }
+      }
+      setGenerationMessage(`Hoàn tất ${next.stickers.length}/${next.count} ảnh. Bản đang tạo đã được lưu trong trình duyệt.`);
     } catch (err) {
-      console.error("Error generating stickers:", err);
-      alert(err instanceof Error ? err.message : "Có lỗi xảy ra khi tạo sticker. Vui lòng thử lại.");
+      setGenerationMessage(err instanceof Error ? err.message : "Đã tạm dừng. Các ảnh đã tạo được giữ lại.");
     } finally {
       setIsLoading(false);
     }
@@ -124,11 +150,22 @@ export default function App() {
         savedPacksCount={savedPacks.length}
       />
       <main className="pb-16">
+        {(draft || generationMessage) && <section className="mx-auto max-w-4xl px-4 pt-6" aria-live="polite">
+          <div className="rounded-xl border border-blue-200 bg-blue-50 p-4">
+            <p className="font-semibold">{draft ? `${draft.packName}: ${draft.stickers.length}/${draft.count} ảnh` : "Trạng thái tạo ảnh"}</p>
+            <p className="mt-2 text-sm">{generationMessage || "Đã khôi phục bản đang tạo. Bạn có thể xem ảnh hoặc tiếp tục phần còn thiếu."}</p>
+            <div className="mt-3 flex gap-3">
+              {!!draft?.stickers.length && <button type="button" disabled={isLoading} onClick={() => { setCurrentStickers(draft.stickers); setCurrentPackName(draft.packName); setActiveTab("editor"); }} className="rounded-lg bg-white px-3 py-2 disabled:opacity-50">Xem / tải ảnh đã tạo</button>}
+              {draft && draft.completed.length < draft.count && <button type="button" disabled={isLoading || !draftReady} onClick={() => runDraft(draft)} className="rounded-lg bg-blue-600 px-3 py-2 text-white disabled:opacity-50">Tiếp tục {draft.count - draft.completed.length} ảnh còn thiếu</button>}
+            </div>
+            {!!draft?.stickers.length && <div className="mt-3 flex gap-2 overflow-x-auto">{draft.stickers.map(sticker => <img key={sticker.id} src={sticker.imageUrl} alt={sticker.title} className="h-28 rounded-lg" />)}</div>}
+          </div>
+        </section>}
         {activeTab === "create" && (
           <PhotoUploader
             onGenerate={handleGenerateStickers}
             onCompare={handleComparePresets}
-            isLoading={isLoading}
+            isLoading={isLoading || !draftReady}
           />
         )}
         {activeTab === "compare" && compareData && (

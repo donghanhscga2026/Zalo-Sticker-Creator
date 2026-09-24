@@ -2,11 +2,22 @@ import express from "express";
 import { callGradioQueue } from "./gradioQueue";
 import path from "path";
 import fs from "fs/promises";
+import { parse as parseEnv } from "dotenv";
 import { createServer as createViteServer } from "vite";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 const HF_TOKEN_FILE = process.env.HF_TOKEN_FILE || path.resolve(process.cwd(), "..", "HF_TOKEN.env");
+let tokenSource = process.env.HF_TOKEN ? "environment" : "none";
+
+async function verifyHfToken(token: string) {
+  const response = await fetch("https://huggingface.co/api/whoami-v2", {
+    headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(15000),
+  });
+  if (!response.ok) throw Object.assign(new Error(response.status === 401 ? "Token không được Hugging Face chấp nhận." : "Không xác minh được tài khoản Hugging Face."), { status: response.status });
+  const account: any = await response.json();
+  return typeof account.name === "string" ? account.name : "Đã xác thực";
+}
 
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
@@ -481,18 +492,27 @@ app.get("/api/health", (_req, res) => {
   });
 });
 
+app.get("/api/config/hf-token", async (_req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  const token = process.env.HF_TOKEN;
+  if (!token) return res.json({ configured: false, source: "none" });
+  try { res.json({ configured: true, account: await verifyHfToken(token), source: tokenSource }); }
+  catch { res.json({ configured: true, source: tokenSource, error: "Có token nhưng chưa xác minh được với HF. Hãy kiểm tra kết nối hoặc thay token." }); }
+});
+
 app.post("/api/config/hf-token", async (req, res) => {
   const token = typeof req.body?.token === "string" ? req.body.token.trim() : "";
   if (!token || !/^hf_[A-Za-z0-9_-]+$/.test(token)) {
     return res.status(400).json({ error: "Nhập Hugging Face token hợp lệ bắt đầu bằng hf_." });
   }
   try {
+    const account = await verifyHfToken(token);
     await fs.writeFile(HF_TOKEN_FILE, `# Local secret; do not commit this file.\nHF_TOKEN=${token}\n`, { encoding: "utf8", mode: 0o600 });
     process.env.HF_TOKEN = token;
-    res.json({ saved: true, tokenConfigured: true });
+    tokenSource = "saved-file";
+    res.json({ saved: true, tokenConfigured: true, account });
   } catch (error: any) {
-    console.error("HF token save failed:", error?.message || error);
-    res.status(500).json({ error: "Không thể lưu HF_TOKEN.env trong môi trường hiện tại." });
+    res.status(error?.status === 401 ? 400 : 500).json({ error: error?.status === 401 ? "Token không hợp lệ; cấu hình cũ được giữ nguyên." : "Không thể xác minh hoặc lưu token. Cấu hình đang dùng chưa thay đổi." });
   }
 });
 
@@ -578,14 +598,16 @@ app.post("/api/compare-presets", async (req, res) => {
 
 app.post("/api/generate-stickers", async (req, res) => {
   try {
-    const { image, count = 12, preset = "instantid_conservative" } = req.body as { image?: string; count?: number; preset?: GenerationPreset };
+    const { image, count = 12, preset = "pulid_flux_fidelity", poseIndices } = req.body as { image?: string; count?: number; preset?: GenerationPreset; poseIndices?: number[] };
     if (!image) return res.status(400).json({ error: "Chưa có ảnh nguồn." });
+    if (poseIndices !== undefined && (!Array.isArray(poseIndices) || !poseIndices.length || poseIndices.length > 15 || poseIndices.some(i => !Number.isInteger(i) || i < 0 || i >= STICKER_POSES.length))) return res.status(400).json({ error: "Danh sách động tác không hợp lệ." });
     if (preset === "faceid_plus" || preset === "original_face") {
       return res.status(501).json({ error: "Preset này đang ở chế độ thử nghiệm và chưa được kích hoạt an toàn. Hãy dùng một trong 3 preset InstantID trong lúc tích hợp provider được xác minh." });
     }
     const requestedCount = Number.isFinite(Number(count)) ? Number(count) : 12;
     const numStickers = Math.min(Math.max(Math.round(requestedCount), 1), STICKER_POSES.length);
-    const poses = STICKER_POSES.slice(0, numStickers);
+    const indices = poseIndices ? [...new Set(poseIndices)] : Array.from({ length: numStickers }, (_, i) => i);
+    const poses = indices.map(i => STICKER_POSES[i]);
     const source = parseDataUrl(image);
     const results = new Array<any>(poses.length);
     const failures: { index: number; message: string }[] = [];
@@ -597,17 +619,17 @@ app.post("/api/generate-stickers", async (req, res) => {
         if (index >= poses.length) return;
         try {
           results[index] = preset === "pulid_flux_fidelity"
-            ? await generatePulidFluxFidelity(source, poses[index], index)
+            ? await generatePulidFluxFidelity(source, poses[index], indices[index])
             : preset === "pulid_fidelity"
-              ? await generatePulidFidelity(source, poses[index], index)
-              : await generateOne(source, poses[index], index, preset);
+              ? await generatePulidFidelity(source, poses[index], indices[index])
+              : await generateOne(source, poses[index], indices[index], preset);
         } catch (err: any) {
           console.error(`Sticker ${index + 1} failed:`, err?.message || err);
+          failures.push({ index: indices[index], message: err?.message || "Generation failed" });
           if (err?.status === 400 || err?.status === 401 || err?.status === 403 || err?.status === 429) {
             fatalError = err;
             return;
           }
-          failures.push({ index, message: err?.message || "Generation failed" });
         }
       }
     };
@@ -615,19 +637,14 @@ app.post("/api/generate-stickers", async (req, res) => {
     // multiple wasted generations when the provider rejects a model/account.
     await worker();
 
-    if (fatalError) {
-      return res.status(502).json({
-        error: `InstantID public Space lỗi: ${fatalError?.message || "unknown error"}`,
-        code: "INSTANTID_PUBLIC_SPACE_ERROR",
-      });
-    }
-
     const stickers = results.filter(Boolean);
+    const quota = fatalError?.status === 429;
+    const message = quota ? "Hugging Face đã hết quota GPU. Các ảnh đã tạo được giữ lại. Bạn có thể tiếp tục phần còn thiếu khi tài khoản có quota. HF chưa cung cấp thời gian khôi phục đáng tin cậy." : fatalError?.message;
     if (!stickers.length) {
-      return res.status(502).json({ error: `AI không tạo được ảnh. ${failures[0]?.message || "Kiểm tra Cloudflare Workers AI token/quota/model access."}` });
+      return res.status(quota ? 429 : 502).json({ error: message || failures[0]?.message || "Provider không trả ảnh.", code: quota ? "HF_QUOTA_EXCEEDED" : "PROVIDER_ERROR", stickers: [], failures, remaining: indices });
     }
 
-    res.json({ success: true, stickers, requested: poses.length, generated: stickers.length, failures });
+    res.json({ success: true, stickers, requested: poses.length, generated: stickers.length, failures, warning: message, code: quota ? "HF_QUOTA_EXCEEDED" : undefined, remaining: indices.filter((_, i) => !results[i]) });
   } catch (error: any) {
     console.error("Error in /api/generate-stickers:", error);
     res.status(500).json({ error: error?.message || "Failed to generate stickers" });
@@ -635,6 +652,10 @@ app.post("/api/generate-stickers", async (req, res) => {
 });
 
 async function startServer() {
+  try {
+    const saved = parseEnv(await fs.readFile(HF_TOKEN_FILE, "utf8")).HF_TOKEN?.trim();
+    if (saved && /^hf_[A-Za-z0-9_-]+$/.test(saved)) { process.env.HF_TOKEN = saved; tokenSource = "saved-file"; }
+  } catch (error: any) { if (error.code !== "ENOENT") console.warn("Không đọc được file token; sử dụng cấu hình môi trường."); }
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({ server: { middlewareMode: true }, appType: "spa" });
     app.use(vite.middlewares);
