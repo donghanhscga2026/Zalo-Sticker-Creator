@@ -93,7 +93,7 @@ export default function App() {
           body: JSON.stringify({
             image: next.image,
             count: next.count,
-            style: next.preset || "photo_real",
+            style: ["photo_real", "cute_soft", "sticker_clean"].includes(next.preset) ? next.preset : "photo_real",
             poseIndices: [index],
           }),
         });
