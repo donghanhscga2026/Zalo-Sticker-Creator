@@ -44,6 +44,25 @@ export const PhotoUploader: React.FC<PhotoUploaderProps> = ({ onGenerate, onComp
   const [poseIndex, setPoseIndex] = useState<number>(0);
   const [comparePresets, setComparePresets] = useState<GenerationPresetId[]>(COMPARE_PRESETS.map((item) => item.id));
   const [error, setError] = useState<string | null>(null);
+  const [hfToken, setHfToken] = useState("");
+  const [tokenMessage, setTokenMessage] = useState<string | null>(null);
+
+  const saveHfToken = async () => {
+    setTokenMessage(null);
+    try {
+      const response = await fetch("/api/config/hf-token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: hfToken }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data?.error || "Không thể lưu token.");
+      setHfToken("");
+      setTokenMessage("Đã lưu token vào HF_TOKEN.env. Token không hiển thị lại.");
+    } catch (saveError) {
+      setTokenMessage(saveError instanceof Error ? saveError.message : "Không thể lưu token.");
+    }
+  };
 
   const readImage = (file?: File) => {
     if (!file) return;
@@ -111,6 +130,15 @@ export const PhotoUploader: React.FC<PhotoUploaderProps> = ({ onGenerate, onComp
       </div>
 
       <form onSubmit={handleSubmit} className="bg-white rounded-3xl shadow-xl shadow-slate-100 border border-slate-200/80 p-6 sm:p-8 space-y-6">
+        <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+          <label className="block text-sm font-semibold text-slate-800 mb-2">Hugging Face token</label>
+          <div className="flex gap-2">
+            <input type="password" value={hfToken} onChange={(event) => setHfToken(event.target.value)} placeholder="hf_..." autoComplete="off" className="min-w-0 flex-1 rounded-xl border border-amber-300 bg-white px-3 py-2 text-sm" />
+            <button type="button" onClick={saveHfToken} disabled={!hfToken.trim()} className="rounded-xl bg-slate-800 px-4 py-2 text-sm font-semibold text-white disabled:opacity-40">Lưu</button>
+          </div>
+          <p className="mt-2 text-xs text-amber-800">Chỉ lưu cục bộ vào HF_TOKEN.env; không hiển thị lại và không đưa vào log.</p>
+          {tokenMessage && <p className="mt-2 text-xs text-slate-700">{tokenMessage}</p>}
+        </div>
         <div className="grid grid-cols-2 gap-2 p-1 bg-slate-100 rounded-2xl">
           <button
             type="button"

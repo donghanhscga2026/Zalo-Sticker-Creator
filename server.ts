@@ -1,10 +1,12 @@
 import express from "express";
 import { callGradioQueue } from "./gradioQueue";
 import path from "path";
+import fs from "fs/promises";
 import { createServer as createViteServer } from "vite";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
+const HF_TOKEN_FILE = process.env.HF_TOKEN_FILE || path.resolve(process.cwd(), "..", "HF_TOKEN.env");
 
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
@@ -477,6 +479,21 @@ app.get("/api/health", (_req, res) => {
     configured: true,
     hfTokenConfigured: Boolean(process.env.HF_TOKEN),
   });
+});
+
+app.post("/api/config/hf-token", async (req, res) => {
+  const token = typeof req.body?.token === "string" ? req.body.token.trim() : "";
+  if (!token || !/^hf_[A-Za-z0-9_-]+$/.test(token)) {
+    return res.status(400).json({ error: "Nhập Hugging Face token hợp lệ bắt đầu bằng hf_." });
+  }
+  try {
+    await fs.writeFile(HF_TOKEN_FILE, `# Local secret; do not commit this file.\nHF_TOKEN=${token}\n`, { encoding: "utf8", mode: 0o600 });
+    process.env.HF_TOKEN = token;
+    res.json({ saved: true, tokenConfigured: true });
+  } catch (error: any) {
+    console.error("HF token save failed:", error?.message || error);
+    res.status(500).json({ error: "Không thể lưu HF_TOKEN.env trong môi trường hiện tại." });
+  }
 });
 
 
