@@ -93,13 +93,13 @@ async function generateOne(source: { mimeType: string; data: string }, pose: typ
         prompt,
         negativePrompt,
         "(No style)",
-        30,
-        1.35,
-        1.25,
+        cfg.steps,
+        cfg.identity,
+        cfg.adapter,
         0.0,
         0.0,
         [],
-        3.5,
+        cfg.cfg,
         42 + index,
         "EulerDiscreteScheduler",
         false,
@@ -474,6 +474,32 @@ async function generatePulidFluxFidelity(source: { mimeType: string; data: strin
   };
 }
 
+
+const COMPARE_PRESET_LABELS: Record<string, string> = {
+  instantid_balanced: "InstantID — Cân bằng",
+  instantid_fidelity: "InstantID — Giữ mặt cao",
+  instantid_conservative: "InstantID — Bảo thủ / giữ mặt tối đa",
+  pulid_fidelity: "PuLID SDXL Fidelity",
+  pulid_flux_fidelity: "PuLID-FLUX v0.9.1 / Krea",
+};
+
+const COMPARE_PRESETS = Object.keys(COMPARE_PRESET_LABELS) as GenerationPreset[];
+
+async function generateWithPreset(
+  preset: GenerationPreset,
+  source: { mimeType: string; data: string },
+  pose: typeof STICKER_POSES[number],
+  index: number,
+) {
+  if (preset === "pulid_flux_fidelity") {
+    return generatePulidFluxFidelity(source, pose, index);
+  }
+  if (preset === "pulid_fidelity") {
+    return generatePulidFidelity(source, pose, index);
+  }
+  return generateOne(source, pose, index, preset);
+}
+
 app.get("/api/health", (_req, res) => {
   res.json({
     status: "ok",
@@ -482,6 +508,86 @@ app.get("/api/health", (_req, res) => {
     configured: true,
     hfTokenConfigured: Boolean(process.env.HF_TOKEN),
   });
+});
+
+
+app.post("/api/compare-presets", async (req, res) => {
+  try {
+    const {
+      image,
+      poseIndex = 0,
+      presets = COMPARE_PRESETS,
+    } = req.body as {
+      image?: string;
+      poseIndex?: number;
+      presets?: GenerationPreset[];
+    };
+
+    if (!image) return res.status(400).json({ error: "Chưa có ảnh nguồn." });
+
+    const normalizedPoseIndex = Math.min(
+      Math.max(Number.isFinite(Number(poseIndex)) ? Number(poseIndex) : 0, 0),
+      STICKER_POSES.length - 1,
+    );
+    const pose = STICKER_POSES[normalizedPoseIndex];
+    const requestedPresets = [...new Set(presets)]
+      .filter((preset): preset is GenerationPreset => COMPARE_PRESETS.includes(preset))
+      .slice(0, COMPARE_PRESETS.length);
+
+    if (!requestedPresets.length) {
+      return res.status(400).json({ error: "Không có preset hợp lệ để so sánh." });
+    }
+
+    const source = parseDataUrl(image);
+    const results: Array<{
+      preset: GenerationPreset;
+      label: string;
+      status: "success" | "error";
+      durationMs: number;
+      sticker?: any;
+      error?: string;
+    }> = [];
+
+    // Deliberately sequential: public ZeroGPU Spaces are rate/queue sensitive.
+    // Each preset is isolated so one provider failure never erases the others.
+    for (let index = 0; index < requestedPresets.length; index++) {
+      const preset = requestedPresets[index];
+      const startedAt = Date.now();
+      try {
+        const sticker = await generateWithPreset(preset, source, pose, index);
+        results.push({
+          preset,
+          label: COMPARE_PRESET_LABELS[preset],
+          status: "success",
+          durationMs: Date.now() - startedAt,
+          sticker,
+        });
+      } catch (error: any) {
+        console.error(`Compare preset ${preset} failed:`, error?.message || error);
+        results.push({
+          preset,
+          label: COMPARE_PRESET_LABELS[preset],
+          status: "error",
+          durationMs: Date.now() - startedAt,
+          error: error?.message || "Generation failed",
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      sourceImage: image,
+      pose: {
+        index: normalizedPoseIndex,
+        name: pose.name,
+        caption: pose.caption,
+      },
+      results,
+    });
+  } catch (error: any) {
+    console.error("Error in /api/compare-presets:", error);
+    res.status(500).json({ error: error?.message || "Failed to compare presets" });
+  }
 });
 
 app.post("/api/generate-stickers", async (req, res) => {

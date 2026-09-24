@@ -22,3 +22,30 @@ export interface ExpressionOption {
   prompt: string;
   defaultCaption: string;
 }
+
+export type GenerationPresetId =
+  | "instantid_balanced"
+  | "instantid_fidelity"
+  | "instantid_conservative"
+  | "pulid_fidelity"
+  | "pulid_flux_fidelity";
+
+export interface ComparePresetResult {
+  preset: GenerationPresetId;
+  label: string;
+  status: "success" | "error";
+  durationMs: number;
+  sticker?: Sticker;
+  error?: string;
+}
+
+export interface CompareResponse {
+  success: boolean;
+  sourceImage: string;
+  pose: {
+    index: number;
+    name: string;
+    caption: string;
+  };
+  results: ComparePresetResult[];
+}
