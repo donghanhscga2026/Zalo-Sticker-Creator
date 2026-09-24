@@ -1,661 +1,198 @@
 import express from "express";
-import { callGradioQueue } from "./gradioQueue";
 import path from "path";
-import fs from "fs/promises";
-import { parse as parseEnv } from "dotenv";
 import { createServer as createViteServer } from "vite";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
-const HF_TOKEN_FILE = process.env.HF_TOKEN_FILE || path.resolve(process.cwd(), "..", "HF_TOKEN.env");
-let tokenSource = process.env.HF_TOKEN ? "environment" : "none";
-
-async function verifyHfToken(token: string) {
-  const response = await fetch("https://huggingface.co/api/whoami-v2", {
-    headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(15000),
-  });
-  if (!response.ok) throw Object.assign(new Error(response.status === 401 ? "Token không được Hugging Face chấp nhận." : "Không xác minh được tài khoản Hugging Face."), { status: response.status });
-  const account: any = await response.json();
-  return typeof account.name === "string" ? account.name : "Đã xác thực";
-}
+const OPENAI_IMAGE_MODEL = process.env.OPENAI_IMAGE_MODEL || "gpt-image-2.5-sunburst";
+const OPENAI_IMAGE_QUALITY = process.env.OPENAI_IMAGE_QUALITY || "medium";
 
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
-const CLOUDFLARE_MODEL = "@cf/black-forest-labs/flux-2-klein-4b";
-
-function getCloudflareConfig() {
-  const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
-  const apiToken = process.env.CLOUDFLARE_API_TOKEN;
-  if (!accountId || !apiToken) {
-    throw new Error("Chưa cấu hình CLOUDFLARE_ACCOUNT_ID và CLOUDFLARE_API_TOKEN trong AI Studio Secrets.");
-  }
-  return { accountId, apiToken };
-}
-
 const STICKER_POSES = [
-  { name: "Thumbs Up", prompt: "joyful big smile, one hand clearly giving a thumbs-up toward camera; yellow comic excitement rays", caption: "OK" },
-  { name: "Finger Heart", prompt: "playful wink, one hand making a clear Korean finger-heart; several small red hearts", caption: "Yêu" },
-  { name: "Cute Cheeks", prompt: "eyes happily closed, both open palms cupping the cheeks symmetrically; dreamy red hearts", caption: "Hihi" },
-  { name: "Cool", prompt: "wearing black sunglasses, smiling, both hands doing playful finger-guns; golden sparkles", caption: "Cool" },
-  { name: "Thinking", prompt: "thoughtful sideways glance, one hand under chin; large blue question mark", caption: "Hmm..." },
-  { name: "Surprised", prompt: "wide surprised eyes and O-shaped mouth, both palms on cheeks; yellow comic surprise rays", caption: "Ôi!" },
-  { name: "Coffee", prompt: "relaxed warm smile while holding a small white coffee mug with a simple smiley face", caption: "Chill" },
-  { name: "Laughing", prompt: "laughing hard with eyes squeezed closed and head tilted slightly; black comic HA HA lettering beside the head", caption: "Haha" },
-  { name: "Salute", prompt: "black sunglasses and a crisp playful salute with one hand; cheerful smile", caption: "Roài" },
-  { name: "Double Hearts", prompt: "both hands visible, each hand making a Korean finger-heart; bright affectionate smile; red hearts", caption: "Muaah" },
-  { name: "Look Back", prompt: "upper body turned away about 45 degrees, looking back over the shoulder at camera with a gentle smile; yellow accent rays", caption: "Đẹp" },
-  { name: "Big Heart", prompt: "holding one large flat red heart prop with both hands in front of chest, playful wink and smile; floating red hearts", caption: "Love" },
-  { name: "Fighting", prompt: "determined but cute smile, one clenched fist raised in an encouraging fighting pose; energetic comic rays", caption: "Cố lên" },
-  { name: "Shy", prompt: "shy bashful smile, slightly rosy cheeks, shoulders tucked in; tiny pink hearts and sparkles", caption: "Ái chà" },
-  { name: "Hello", prompt: "friendly enthusiastic wave with one open hand, bright welcoming smile; cheerful motion lines", caption: "Hello" },
-];
+  { name: "Thumbs Up", caption: "OK", prompt: "bright happy smile, one hand clearly giving a thumbs-up toward the viewer" },
+  { name: "Finger Heart", caption: "Yêu", prompt: "warm playful smile, one hand making a clear Korean finger-heart gesture" },
+  { name: "Laughing", caption: "Haha", prompt: "laughing naturally with joyful eyes, lively friendly energy" },
+  { name: "Surprised", caption: "Ôi!", prompt: "cute surprised expression with wide eyes and a small O-shaped mouth, hands near the cheeks" },
+  { name: "Thinking", caption: "Hmm...", prompt: "thoughtful sideways glance, one hand gently under the chin" },
+  { name: "Hello", caption: "Hello", prompt: "friendly enthusiastic wave with one open hand and a welcoming smile" },
+  { name: "Cool", caption: "Cool", prompt: "confident playful smile wearing simple black sunglasses, relaxed cool pose" },
+  { name: "Cute Cheeks", caption: "Hihi", prompt: "bashful happy smile, both open palms lightly framing the cheeks" },
+  { name: "Big Heart", caption: "Love", prompt: "holding one large red heart prop with both hands in front of the chest, affectionate smile" },
+  { name: "Fighting", caption: "Cố lên", prompt: "encouraging determined-but-cute smile with one clenched fist raised" },
+  { name: "Shy", caption: "Ngại quá", prompt: "shy bashful smile, shoulders slightly tucked, gentle rosy-cheek expression" },
+  { name: "Double Hearts", caption: "Muaah", prompt: "bright affectionate smile, both hands making Korean finger-heart gestures" },
+  { name: "Salute", caption: "Roài", prompt: "cheerful playful salute with one hand, natural smile" },
+  { name: "Sleepy", caption: "Buồn ngủ", prompt: "adorably sleepy expression, half-closed eyes, one hand near the cheek" },
+  { name: "Crying Cute", caption: "Huhu", prompt: "cute emotional teary expression without distress, slightly pouting lips" },
+] as const;
+
+const STYLE_PROMPTS: Record<string, string> = {
+  photo_real: "Photorealistic, natural skin texture, realistic proportions, soft studio lighting, premium camera-photo quality.",
+  cute_soft: "Photorealistic identity with a gently cute, friendly expression and soft polished lighting; do not turn the face into a cartoon.",
+  sticker_clean: "Photorealistic recognizable person, crisp clean sticker composition, clear silhouette, polished commercial messaging-sticker finish.",
+};
 
 function parseDataUrl(dataUrl: string) {
   const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/s);
-  if (match) return { mimeType: match[1], data: match[2] };
-  return { mimeType: "image/jpeg", data: dataUrl };
+  if (!match) throw Object.assign(new Error("Ảnh tải lên không đúng định dạng data URL."), { status: 400 });
+  return { mimeType: match[1], data: match[2] };
 }
 
-function parseGradioSsePayloads(eventText: string): any[] {
-  const payloads: any[] = [];
-  for (const line of eventText.split(/\r?\n/)) {
-    if (!line.startsWith("data:")) continue;
-    const raw = line.slice(5).trim();
-    if (!raw || raw === "[DONE]") continue;
-    try {
-      const parsed = JSON.parse(raw);
-      if (parsed !== null && parsed !== undefined) payloads.push(parsed);
-    } catch {
-      // Ignore non-JSON SSE control/heartbeat data.
-    }
-  }
-  return payloads;
+function extensionFor(mimeType: string) {
+  if (mimeType.includes("png")) return "png";
+  if (mimeType.includes("webp")) return "webp";
+  return "jpg";
 }
 
-const INSTANTID_SPACE = "https://instantx-instantid.hf.space";
-const PULID_SPACE = "https://yanze-pulid.hf.space";
-const PULID_FLUX_SPACE = "https://yanze-pulid-flux.hf.space";
+function buildStickerPrompt(posePrompt: string, style: string) {
+  const stylePrompt = STYLE_PROMPTS[style] || STYLE_PROMPTS.photo_real;
+  return [
+    "Create ONE square messaging sticker by editing the supplied reference portrait.",
+    "The person must remain unmistakably the EXACT SAME PERSON as the reference image, not merely similar.",
+    "Preserve facial identity with very high fidelity: face shape, eye shape and spacing, eyelids, eyebrows, nose shape, lips and mouth proportions, cheeks, jawline, chin, ears, skin tone, apparent age, distinctive asymmetry, hairline and hairstyle.",
+    "Preserve the original clothing and accessories unless the requested gesture makes a tiny natural adjustment necessary.",
+    "Do not beautify, redesign, de-age, change ethnicity, slim the jaw, enlarge the eyes, reshape the nose or lips, smooth away natural skin texture, or change hairstyle.",
+    "Change ONLY the pose/expression/hand gesture needed for this sticker:",
+    posePrompt + ".",
+    stylePrompt,
+    "Upper-body framing, natural anatomy, exactly two arms, realistic hands and fingers, subject centered with comfortable margin around the body.",
+    "Use a transparent background with a clean isolated subject suitable for a sticker. Do not add text, letters, logos, watermarks, decorative captions, frames, or speech bubbles.",
+  ].join(" ");
+}
 
-type GenerationPreset = "instantid_balanced" | "instantid_fidelity" | "instantid_conservative" | "faceid_plus" | "pulid_fidelity" | "pulid_flux_fidelity" | "original_face";
-const INSTANTID_PRESETS = {
-  instantid_balanced: { steps: 20, identity: 1.1, adapter: 1.1, cfg: 4.5 },
-  instantid_fidelity: { steps: 30, identity: 1.35, adapter: 1.25, cfg: 3.5 },
-  instantid_conservative: { steps: 30, identity: 1.45, adapter: 1.35, cfg: 2.5 },
-} as const;
+async function generateStickerWithOpenAI(
+  source: { mimeType: string; data: string },
+  pose: typeof STICKER_POSES[number],
+  index: number,
+  style: string,
+) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw Object.assign(new Error("Chưa cấu hình OPENAI_API_KEY trên backend."), { status: 503 });
 
-async function generateOne(source: { mimeType: string; data: string }, pose: typeof STICKER_POSES[number], index: number, preset: GenerationPreset = "instantid_conservative") {
-  const hfToken = process.env.HF_TOKEN;
-  const authHeaders: Record<string, string> = hfToken ? { Authorization: `Bearer ${hfToken}` } : {};
+  const form = new FormData();
+  form.append("model", OPENAI_IMAGE_MODEL);
+  form.append("prompt", buildStickerPrompt(pose.prompt, style));
+  form.append("size", "1024x1024");
+  form.append("quality", OPENAI_IMAGE_QUALITY);
+  form.append("background", "transparent");
+  form.append("output_format", "png");
+  const bytes = Buffer.from(source.data, "base64");
+  form.append("image[]", new Blob([bytes], { type: source.mimeType }), `reference.${extensionFor(source.mimeType)}`);
 
-  // Upload the reference portrait to the official public InstantID Gradio Space.
-  const uploadForm = new FormData();
-  const imageBytes = Buffer.from(source.data, "base64");
-  uploadForm.append("files", new Blob([imageBytes], { type: source.mimeType }), "portrait.jpg");
-  const uploadResponse = await fetch(`${INSTANTID_SPACE}/upload`, {
+  const response = await fetch("https://api.openai.com/v1/images/edits", {
     method: "POST",
-    headers: authHeaders,
-    body: uploadForm,
+    headers: { Authorization: `Bearer ${apiKey}` },
+    body: form,
+    signal: AbortSignal.timeout(5 * 60 * 1000),
   });
-  if (!uploadResponse.ok) {
-    const detail = await uploadResponse.text();
-    const error: any = new Error(`InstantID upload HTTP ${uploadResponse.status}: ${detail.slice(0, 500)}`);
-    error.status = uploadResponse.status;
+
+  const requestId = response.headers.get("x-request-id") || undefined;
+  if (!response.ok) {
+    const detail = await response.text();
+    const error: any = new Error(`OpenAI Image API HTTP ${response.status}: ${detail.slice(0, 900)}`);
+    error.status = response.status;
+    error.requestId = requestId;
     throw error;
   }
-  const uploaded: any = await uploadResponse.json();
-  const uploadedPath = Array.isArray(uploaded) ? uploaded[0] : uploaded?.[0] || uploaded?.path;
-  if (!uploadedPath) throw new Error("InstantID upload không trả về đường dẫn ảnh.");
 
-  const cfg = INSTANTID_PRESETS[preset as keyof typeof INSTANTID_PRESETS] || INSTANTID_PRESETS.instantid_conservative;
-  const prompt = `Unedited RAW photorealistic portrait of the EXACT SAME PERSON in the reference. Treat the reference face as fixed identity, not inspiration. Keep the face nearly unchanged: identical head shape, facial proportions, eye size and spacing, eyelids, eyebrows, nose width and shape, lips and mouth proportions, cheeks, jawline, chin, ears, skin tone, apparent age, hairline and hairstyle. Keep natural pores, skin texture, asymmetry and distinctive facial features. NO beautification and NO cosmetic redesign. Keep the EXACT SAME clothing and accessories from the reference. Change ONLY the arm and hand gesture to: ${pose.prompt}. Keep head angle and facial expression close to the reference, with only a subtle natural smile if needed. Real camera photo, neutral soft light, upper body, anatomically correct hand, plain clean white background, no sticker decorations, no symbols, no writing.`;
-  const negativePrompt = "different person, identity drift, changed face, face swap, altered facial geometry, enlarged eyes, doll eyes, narrowed jaw, V-shaped jaw, smaller nose, reshaped nose, fuller lips, changed mouth, changed eyebrows, changed cheeks, younger face, beauty filter, skin smoothing, airbrushed skin, porcelain skin, glamour retouching, excessive makeup, lipstick change, doll face, cartoon, anime, illustration, 3d render, stylized face, changed hairstyle, changed hairline, changed clothing, costume, red clothing, cheek sticker, face sticker, emoji, hearts, comic rays, decorations, symbols, text, letters, characters, logo, watermark, deformed face, bad hands, extra fingers, extra limbs, blurry, low quality";
-
-  // The official InstantID Space exposes this named Gradio endpoint.
-  // IdentityNet and adapter strengths are deliberately high to prioritize likeness.
-  const callResponse = await fetch(`${INSTANTID_SPACE}/call/generate_image`, {
-    method: "POST",
-    headers: { ...authHeaders, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      data: [
-        { path: uploadedPath, meta: { _type: "gradio.FileData" } },
-        null,
-        prompt,
-        negativePrompt,
-        "(No style)",
-        cfg.steps,
-        cfg.identity,
-        cfg.adapter,
-        0.0,
-        0.0,
-        [],
-        cfg.cfg,
-        42 + index,
-        "EulerDiscreteScheduler",
-        false,
-        true
-      ]
-    }),
-  });
-  if (!callResponse.ok) {
-    const detail = await callResponse.text();
-    const error: any = new Error(`InstantID call HTTP ${callResponse.status}: ${detail.slice(0, 700)}`);
-    error.status = callResponse.status;
-    throw error;
-  }
-  const callData: any = await callResponse.json();
-  if (!callData?.event_id) throw new Error("InstantID không trả về event_id.");
-
-  // Gradio returns generation results as server-sent events.
-  const resultResponse = await fetch(`${INSTANTID_SPACE}/call/generate_image/${callData.event_id}`, {
-    headers: authHeaders,
-  });
-  if (!resultResponse.ok) {
-    const detail = await resultResponse.text();
-    const error: any = new Error(`InstantID result HTTP ${resultResponse.status}: ${detail.slice(0, 700)}`);
-    error.status = resultResponse.status;
-    throw error;
-  }
-  const eventText = await resultResponse.text();
-  const payloads = parseGradioSsePayloads(eventText);
-  if (!payloads.length) throw new Error(`InstantID không trả về dữ liệu ảnh: ${eventText.slice(-700)}`);
-
-  // Gradio versions can wrap outputs as [FileData, update], {data:[...]},
-  // or nested arrays. Find the first actual image FileData recursively.
-  const findImageRef = (value: any): string | null => {
-    if (!value) return null;
-    if (typeof value === "string") {
-      const lower = value.toLowerCase();
-      return value.startsWith("http://") ||
-        value.startsWith("https://") ||
-        lower.includes(".png") ||
-        lower.includes(".jpg") ||
-        lower.includes(".jpeg") ||
-        lower.includes(".webp")
-        ? value
-        : null;
-    }
-    if (Array.isArray(value)) {
-      for (const item of value) {
-        const found = findImageRef(item);
-        if (found) return found;
-      }
-      return null;
-    }
-    if (typeof value === "object") {
-      if (typeof value.url === "string") return value.url;
-      if (typeof value.path === "string") return value.path;
-      if (value.data) {
-        const found = findImageRef(value.data);
-        if (found) return found;
-      }
-      for (const child of Object.values(value)) {
-        const found = findImageRef(child);
-        if (found) return found;
-      }
-    }
-    return null;
-  };
-
-  const payload = [...payloads].reverse().find((candidate) => Boolean(findImageRef(candidate)));
-  const imageUrl = payload ? findImageRef(payload) : null;
-  if (!imageUrl) {
-    console.error("InstantID raw SSE tail:", eventText.slice(-2000));
-    throw new Error(`Không đọc được URL ảnh từ InstantID. SSE payloads: ${JSON.stringify(payloads).slice(-900)}`);
-  }
-
-  // Modern Gradio FileData often returns /gradio_api/file=<path> or a full URL.
-  // Older Spaces used /file=<path>. Try the exact reference first, then both
-  // Gradio file routes before failing.
-  const normalizeInstantIdFileRef = (ref: string): string[] => {
-    const refs: string[] = [];
-
-    // The public Space currently returns a queue-scoped URL such as
-    // /call/gen/file=/tmp/gradio/.../image.webp. That route is not a public
-    // file-serving endpoint. Extract the underlying Gradio temp path and
-    // rebuild it against the actual file endpoints.
-    const fileMarker = "file=";
-    const markerIndex = ref.indexOf(fileMarker);
-    const rawPath = markerIndex >= 0 ? ref.slice(markerIndex + fileMarker.length) : ref;
-
-    if (ref.startsWith("http")) refs.push(ref);
-    else if (ref.startsWith("/") && markerIndex < 0) refs.push(`${INSTANTID_SPACE}${ref}`);
-
-    if (rawPath) {
-      refs.push(`${INSTANTID_SPACE}/gradio_api/file=${encodeURI(rawPath)}`);
-      refs.push(`${INSTANTID_SPACE}/file=${encodeURI(rawPath)}`);
-    }
-
-    return [...new Set(refs)];
-  };
-
-  const candidates = normalizeInstantIdFileRef(imageUrl);
-
-  let imageResponse: Response | null = null;
-  let lastStatus = 0;
-  for (const candidate of candidates) {
-    const attempt = await fetch(candidate, { headers: authHeaders });
-    lastStatus = attempt.status;
-    if (attempt.ok) {
-      imageResponse = attempt;
-      break;
-    }
-  }
-  if (!imageResponse) {
-    console.error("InstantID image reference:", imageUrl);
-    throw new Error(`Không tải được ảnh InstantID (HTTP ${lastStatus}). Ref: ${imageUrl.slice(0, 300)}`);
-  }
-  const outputType = imageResponse.headers.get("content-type") || "image/png";
-  const outputBytes = Buffer.from(await imageResponse.arrayBuffer());
+  const payload: any = await response.json();
+  const b64 = payload?.data?.[0]?.b64_json;
+  if (!b64) throw Object.assign(new Error("OpenAI Image API không trả về dữ liệu ảnh."), { status: 502, requestId });
 
   return {
     id: `sticker_${index + 1}`,
     title: pose.name,
-    imageUrl: `data:${outputType.split(";")[0]};base64,${outputBytes.toString("base64")}`,
     caption: pose.caption,
+    imageUrl: `data:image/png;base64,${b64}`,
+    provider: "openai",
+    requestId,
   };
-}
-
-
-async function generatePulidFidelity(source: { mimeType: string; data: string }, pose: typeof STICKER_POSES[number], index: number) {
-  const hfToken = process.env.HF_TOKEN;
-  const authHeaders: Record<string, string> = hfToken ? { Authorization: `Bearer ${hfToken}` } : {};
-  const uploadForm = new FormData();
-  uploadForm.append("files", new Blob([Buffer.from(source.data, "base64")], { type: source.mimeType }), "portrait.jpg");
-  const uploadResponse = await fetch(`${PULID_SPACE}/gradio_api/upload`, { method: "POST", headers: authHeaders, body: uploadForm });
-  if (!uploadResponse.ok) {
-    const detail = await uploadResponse.text();
-    throw Object.assign(new Error(`PuLID upload HTTP ${uploadResponse.status}: ${detail.slice(0, 500)}`), { status: uploadResponse.status });
-  }
-  const uploaded: any = await uploadResponse.json();
-  const uploadedPath = Array.isArray(uploaded) ? uploaded[0] : uploaded?.[0] || uploaded?.path;
-  if (!uploadedPath) throw new Error("PuLID upload không trả về đường dẫn ảnh.");
-
-  const prompt = `photorealistic portrait, exact same person and facial identity as reference, same age, hairstyle, skin tone and clothing, ${pose.prompt}, upper body, realistic skin texture, clean white background, no text, no decorations`;
-  const negativePrompt = "different person, changed identity, beauty filter, altered face, doll face, cartoon, text, watermark, deformed face, bad eyes, bad hands, extra fingers, extra limbs, blurry";
-  const data = [
-    { path: uploadedPath, meta: { _type: "gradio.FileData" } },
-    null, null, null, prompt, negativePrompt,
-    1.2, 1, 42 + index, 8, 1024, 768, 1.2, "fidelity", false
-  ];
-  const callResponse = await fetch(`${PULID_SPACE}/gradio_api/call/run`, {
-    method: "POST",
-    headers: { ...authHeaders, "Content-Type": "application/json" },
-    body: JSON.stringify({ data }),
-  });
-  if (!callResponse.ok) {
-    const detail = await callResponse.text();
-    throw Object.assign(new Error(`PuLID call HTTP ${callResponse.status}: ${detail.slice(0, 700)}`), { status: callResponse.status });
-  }
-  const callData: any = await callResponse.json();
-  if (!callData?.event_id) throw new Error("PuLID không trả về event_id.");
-  const resultResponse = await fetch(`${PULID_SPACE}/gradio_api/call/run/${callData.event_id}`, { headers: authHeaders });
-  if (!resultResponse.ok) throw Object.assign(new Error(`PuLID result HTTP ${resultResponse.status}`), { status: resultResponse.status });
-  const eventText = await resultResponse.text();
-  const payloads = parseGradioSsePayloads(eventText);
-  if (!payloads.length) throw new Error(`PuLID không trả về dữ liệu ảnh: ${eventText.slice(-700)}`);
-
-  const findImageRef = (value: any): string | null => {
-    if (!value) return null;
-    if (typeof value === "string") {
-      const lower = value.toLowerCase();
-      return value.startsWith("http://") || value.startsWith("https://") ||
-        lower.includes(".png") || lower.includes(".jpg") || lower.includes(".jpeg") || lower.includes(".webp") ? value : null;
-    }
-    if (Array.isArray(value)) {
-      for (const item of value) { const found = findImageRef(item); if (found) return found; }
-      return null;
-    }
-    if (typeof value === "object") {
-      if (typeof value.url === "string") return value.url;
-      if (typeof value.path === "string") return value.path;
-      for (const child of Object.values(value)) { const found = findImageRef(child); if (found) return found; }
-    }
-    return null;
-  };
-  const payload = [...payloads].reverse().find((candidate) => Boolean(findImageRef(candidate)));
-  const imageRef = payload ? findImageRef(payload) : null;
-  if (!imageRef) throw new Error(`Không đọc được ảnh PuLID. SSE payloads: ${JSON.stringify(payloads).slice(-900)}`);
-  const marker = imageRef.indexOf("file=");
-  const rawPath = marker >= 0 ? imageRef.slice(marker + 5) : imageRef;
-  const candidates = [
-    ...(imageRef.startsWith("http") ? [imageRef] : []),
-    `${PULID_SPACE}/gradio_api/file=${encodeURI(rawPath)}`,
-    `${PULID_SPACE}/file=${encodeURI(rawPath)}`,
-  ];
-  let imageResponse: Response | null = null;
-  for (const candidate of [...new Set(candidates)]) {
-    const attempt = await fetch(candidate, { headers: authHeaders });
-    if (attempt.ok) { imageResponse = attempt; break; }
-  }
-  if (!imageResponse) throw new Error(`Không tải được ảnh PuLID. Ref: ${imageRef.slice(0, 300)}`);
-  const outputType = imageResponse.headers.get("content-type") || "image/png";
-  const outputBytes = Buffer.from(await imageResponse.arrayBuffer());
-  return {
-    id: `sticker_${index + 1}`,
-    title: `${pose.name} · PuLID Fidelity`,
-    imageUrl: `data:${outputType.split(";")[0]};base64,${outputBytes.toString("base64")}`,
-    caption: pose.caption,
-  };
-}
-
-
-async function generatePulidFluxFidelity(source: { mimeType: string; data: string }, pose: typeof STICKER_POSES[number], index: number) {
-  const hfToken = process.env.HF_TOKEN;
-  const authHeaders: Record<string, string> = hfToken ? { Authorization: `Bearer ${hfToken}` } : {};
-
-  // Verify the live Gradio schema before spending a ZeroGPU generation.
-  const infoResponse = await fetch(`${PULID_FLUX_SPACE}/gradio_api/info`, { headers: authHeaders });
-  if (!infoResponse.ok) {
-    const detail = await infoResponse.text();
-    throw Object.assign(new Error(`PuLID-FLUX schema HTTP ${infoResponse.status}: ${detail.slice(0, 500)}`), { status: infoResponse.status });
-  }
-  const infoText = await infoResponse.text();
-  if (!infoText.includes("generate_image")) {
-    throw new Error("PuLID-FLUX API schema đã thay đổi: không tìm thấy endpoint generate_image.");
-  }
-
-  const uploadForm = new FormData();
-  uploadForm.append("files", new Blob([Buffer.from(source.data, "base64")], { type: source.mimeType }), "portrait.jpg");
-  const uploadResponse = await fetch(`${PULID_FLUX_SPACE}/gradio_api/upload`, {
-    method: "POST",
-    headers: authHeaders,
-    body: uploadForm,
-  });
-  if (!uploadResponse.ok) {
-    const detail = await uploadResponse.text();
-    throw Object.assign(new Error(`PuLID-FLUX upload HTTP ${uploadResponse.status}: ${detail.slice(0, 500)}`), { status: uploadResponse.status });
-  }
-  const uploaded: any = await uploadResponse.json();
-  const uploadedPath = Array.isArray(uploaded) ? uploaded[0] : uploaded?.[0] || uploaded?.path;
-  if (!uploadedPath) throw new Error("PuLID-FLUX upload không trả về đường dẫn ảnh.");
-
-  const prompt = `RAW realistic sticker portrait of the exact same person as the identity reference. Preserve recognizable facial identity: face shape, eye shape and spacing, eyebrows, nose, lips, cheeks, jaw, chin, apparent age and natural skin tone. Natural skin texture, no beauty filter. Keep a gentle expression appropriate to this sticker. Change the hairstyle to a straight dark brown chin-length bob and clothing to a light blue button-up shirt. Change the pose and expression only to: ${pose.prompt}. Upper-body framing, natural anatomy, exactly two arms, clean uniform light gray background, soft even studio light. No lettering, logo, watermark or decorative rays.`;
-  const negativePrompt = "different person, identity drift, changed facial geometry, beauty filter, enlarged eyes, V-shaped jaw, reshaped nose, fuller lips, changed hairstyle, changed clothing, cartoon, anime, illustration, text, watermark, bad hands, extra fingers, extra limbs, blurry, low quality";
-
-  // Current official PuLID-FLUX generate_image signature:
-  // prompt, id_image, start_step, guidance, seed, true_cfg,
-  // width, height, num_steps, id_weight, neg_prompt,
-  // timestep_to_start_cfg, max_sequence_length.
-  const data = [
-    prompt,
-    { path: uploadedPath, orig_name: "portrait.jpg", meta: { _type: "gradio.FileData" } },
-    2,
-    4,
-    42 + index,
-    1,
-    896,
-    1152,
-    28,
-    1.0,
-    negativePrompt,
-    1,
-    512,
-  ];
-
-  const outputs = await callGradioQueue(PULID_FLUX_SPACE, "generate_image", data, authHeaders);
-  // Only the first output is the generated image; later outputs are debug face crops.
-  if (!outputs[0]) throw new Error("PuLID-FLUX không trả ảnh đầu ra. " + String(outputs[1] || ""));
-  const payloads = [outputs[0]];
-
-  const findImageRef = (value: any): string | null => {
-    if (!value) return null;
-    if (typeof value === "string") {
-      const lower = value.toLowerCase();
-      return value.startsWith("http://") || value.startsWith("https://") ||
-        lower.includes(".png") || lower.includes(".jpg") || lower.includes(".jpeg") || lower.includes(".webp")
-        ? value
-        : null;
-    }
-    if (Array.isArray(value)) {
-      for (const item of value) {
-        const found = findImageRef(item);
-        if (found) return found;
-      }
-      return null;
-    }
-    if (typeof value === "object") {
-      if (typeof value.url === "string") return value.url;
-      if (typeof value.path === "string") return value.path;
-      for (const child of Object.values(value)) {
-        const found = findImageRef(child);
-        if (found) return found;
-      }
-    }
-    return null;
-  };
-
-  const payload = [...payloads].reverse().find((candidate) => Boolean(findImageRef(candidate)));
-  const imageRef = payload ? findImageRef(payload) : null;
-  if (!imageRef) throw new Error(`Không đọc được ảnh PuLID-FLUX. SSE payloads: ${JSON.stringify(payloads).slice(-900)}`);
-  const marker = imageRef.indexOf("file=");
-  const rawPath = marker >= 0 ? imageRef.slice(marker + 5) : imageRef;
-  const candidates = [
-    ...(imageRef.startsWith("http") ? [imageRef] : []),
-    `${PULID_FLUX_SPACE}/gradio_api/file=${encodeURI(rawPath)}`,
-    `${PULID_FLUX_SPACE}/file=${encodeURI(rawPath)}`,
-  ];
-
-  let imageResponse: Response | null = null;
-  for (const candidate of [...new Set(candidates)]) {
-    const attempt = await fetch(candidate, { headers: authHeaders });
-    if (attempt.ok) {
-      imageResponse = attempt;
-      break;
-    }
-  }
-  if (!imageResponse) throw new Error(`Không tải được ảnh PuLID-FLUX. Ref: ${imageRef.slice(0, 300)}`);
-
-  const outputType = imageResponse.headers.get("content-type") || "image/png";
-  const outputBytes = Buffer.from(await imageResponse.arrayBuffer());
-  return {
-    id: `sticker_${index + 1}`,
-    title: `${pose.name} · PuLID-FLUX Fidelity`,
-    imageUrl: `data:${outputType.split(";")[0]};base64,${outputBytes.toString("base64")}`,
-    caption: pose.caption,
-  };
-}
-
-
-const COMPARE_PRESET_LABELS: Record<string, string> = {
-  instantid_balanced: "InstantID — Cân bằng",
-  instantid_fidelity: "InstantID — Giữ mặt cao",
-  instantid_conservative: "InstantID — Bảo thủ / giữ mặt tối đa",
-  pulid_fidelity: "PuLID SDXL Fidelity",
-  pulid_flux_fidelity: "PuLID-FLUX v0.9.1 / Krea",
-};
-
-const COMPARE_PRESETS = Object.keys(COMPARE_PRESET_LABELS) as GenerationPreset[];
-
-async function generateWithPreset(
-  preset: GenerationPreset,
-  source: { mimeType: string; data: string },
-  pose: typeof STICKER_POSES[number],
-  index: number,
-) {
-  if (preset === "pulid_flux_fidelity") {
-    return generatePulidFluxFidelity(source, pose, index);
-  }
-  if (preset === "pulid_fidelity") {
-    return generatePulidFidelity(source, pose, index);
-  }
-  return generateOne(source, pose, index, preset);
 }
 
 app.get("/api/health", (_req, res) => {
   res.json({
     status: "ok",
-    imageProvider: "huggingface-instantid-public-space",
-    imageModel: "InstantX/InstantID",
-    configured: true,
-    hfTokenConfigured: Boolean(process.env.HF_TOKEN),
+    imageProvider: "openai",
+    imageModel: OPENAI_IMAGE_MODEL,
+    imageQuality: OPENAI_IMAGE_QUALITY,
+    configured: Boolean(process.env.OPENAI_API_KEY),
   });
-});
-
-app.get("/api/config/hf-token", async (_req, res) => {
-  res.setHeader("Cache-Control", "no-store");
-  const token = process.env.HF_TOKEN;
-  if (!token) return res.json({ configured: false, source: "none" });
-  try { res.json({ configured: true, account: await verifyHfToken(token), source: tokenSource }); }
-  catch { res.json({ configured: true, source: tokenSource, error: "Có token nhưng chưa xác minh được với HF. Hãy kiểm tra kết nối hoặc thay token." }); }
-});
-
-app.post("/api/config/hf-token", async (req, res) => {
-  const token = typeof req.body?.token === "string" ? req.body.token.trim() : "";
-  if (!token || !/^hf_[A-Za-z0-9_-]+$/.test(token)) {
-    return res.status(400).json({ error: "Nhập Hugging Face token hợp lệ bắt đầu bằng hf_." });
-  }
-  try {
-    const account = await verifyHfToken(token);
-    await fs.writeFile(HF_TOKEN_FILE, `# Local secret; do not commit this file.\nHF_TOKEN=${token}\n`, { encoding: "utf8", mode: 0o600 });
-    process.env.HF_TOKEN = token;
-    tokenSource = "saved-file";
-    res.json({ saved: true, tokenConfigured: true, account });
-  } catch (error: any) {
-    res.status(error?.status === 401 ? 400 : 500).json({ error: error?.status === 401 ? "Token không hợp lệ; cấu hình cũ được giữ nguyên." : "Không thể xác minh hoặc lưu token. Cấu hình đang dùng chưa thay đổi." });
-  }
-});
-
-
-app.post("/api/compare-presets", async (req, res) => {
-  try {
-    const {
-      image,
-      poseIndex = 0,
-      presets = COMPARE_PRESETS,
-    } = req.body as {
-      image?: string;
-      poseIndex?: number;
-      presets?: GenerationPreset[];
-    };
-
-    if (!image) return res.status(400).json({ error: "Chưa có ảnh nguồn." });
-
-    const normalizedPoseIndex = Math.min(
-      Math.max(Number.isFinite(Number(poseIndex)) ? Number(poseIndex) : 0, 0),
-      STICKER_POSES.length - 1,
-    );
-    const pose = STICKER_POSES[normalizedPoseIndex];
-    const requestedPresets = [...new Set(presets)]
-      .filter((preset): preset is GenerationPreset => COMPARE_PRESETS.includes(preset))
-      .slice(0, COMPARE_PRESETS.length);
-
-    if (!requestedPresets.length) {
-      return res.status(400).json({ error: "Không có preset hợp lệ để so sánh." });
-    }
-
-    const source = parseDataUrl(image);
-    const results: Array<{
-      preset: GenerationPreset;
-      label: string;
-      status: "success" | "error";
-      durationMs: number;
-      sticker?: any;
-      error?: string;
-    }> = [];
-
-    // Deliberately sequential: public ZeroGPU Spaces are rate/queue sensitive.
-    // Each preset is isolated so one provider failure never erases the others.
-    for (let index = 0; index < requestedPresets.length; index++) {
-      const preset = requestedPresets[index];
-      const startedAt = Date.now();
-      try {
-        const sticker = await generateWithPreset(preset, source, pose, index);
-        results.push({
-          preset,
-          label: COMPARE_PRESET_LABELS[preset],
-          status: "success",
-          durationMs: Date.now() - startedAt,
-          sticker,
-        });
-      } catch (error: any) {
-        console.error(`Compare preset ${preset} failed:`, error?.message || error);
-        results.push({
-          preset,
-          label: COMPARE_PRESET_LABELS[preset],
-          status: "error",
-          durationMs: Date.now() - startedAt,
-          error: error?.message || "Generation failed",
-        });
-      }
-    }
-
-    res.json({
-      success: true,
-      sourceImage: image,
-      pose: {
-        index: normalizedPoseIndex,
-        name: pose.name,
-        caption: pose.caption,
-      },
-      results,
-    });
-  } catch (error: any) {
-    console.error("Error in /api/compare-presets:", error);
-    res.status(500).json({ error: error?.message || "Failed to compare presets" });
-  }
 });
 
 app.post("/api/generate-stickers", async (req, res) => {
   try {
-    const { image, count = 12, preset = "pulid_flux_fidelity", poseIndices } = req.body as { image?: string; count?: number; preset?: GenerationPreset; poseIndices?: number[] };
+    const {
+      image,
+      count = 12,
+      style = "photo_real",
+      poseIndices,
+    } = req.body as {
+      image?: string;
+      count?: number;
+      style?: string;
+      poseIndices?: number[];
+    };
+
     if (!image) return res.status(400).json({ error: "Chưa có ảnh nguồn." });
-    if (poseIndices !== undefined && (!Array.isArray(poseIndices) || !poseIndices.length || poseIndices.length > 15 || poseIndices.some(i => !Number.isInteger(i) || i < 0 || i >= STICKER_POSES.length))) return res.status(400).json({ error: "Danh sách động tác không hợp lệ." });
-    if (preset === "faceid_plus" || preset === "original_face") {
-      return res.status(501).json({ error: "Preset này đang ở chế độ thử nghiệm và chưa được kích hoạt an toàn. Hãy dùng một trong 3 preset InstantID trong lúc tích hợp provider được xác minh." });
-    }
-    const requestedCount = Number.isFinite(Number(count)) ? Number(count) : 12;
-    const numStickers = Math.min(Math.max(Math.round(requestedCount), 1), STICKER_POSES.length);
-    const indices = poseIndices ? [...new Set(poseIndices)] : Array.from({ length: numStickers }, (_, i) => i);
-    const poses = indices.map(i => STICKER_POSES[i]);
+    if (!process.env.OPENAI_API_KEY) return res.status(503).json({ error: "Backend chưa có OPENAI_API_KEY.", code: "OPENAI_NOT_CONFIGURED" });
+    if (!(style in STYLE_PROMPTS)) return res.status(400).json({ error: "Style không hợp lệ." });
+
+    const requestedCount = Math.min(Math.max(Math.round(Number(count) || 12), 1), STICKER_POSES.length);
+    const indices = poseIndices
+      ? [...new Set(poseIndices)].filter((i) => Number.isInteger(i) && i >= 0 && i < STICKER_POSES.length)
+      : Array.from({ length: requestedCount }, (_, i) => i);
+
+    if (!indices.length) return res.status(400).json({ error: "Danh sách biểu cảm không hợp lệ." });
+
     const source = parseDataUrl(image);
-    const results = new Array<any>(poses.length);
-    const failures: { index: number; message: string }[] = [];
-    let next = 0;
-    let fatalError: any = null;
-    const worker = async () => {
-      while (!fatalError) {
-        const index = next++;
-        if (index >= poses.length) return;
-        try {
-          results[index] = preset === "pulid_flux_fidelity"
-            ? await generatePulidFluxFidelity(source, poses[index], indices[index])
-            : preset === "pulid_fidelity"
-              ? await generatePulidFidelity(source, poses[index], indices[index])
-              : await generateOne(source, poses[index], indices[index], preset);
-        } catch (err: any) {
-          console.error(`Sticker ${index + 1} failed:`, err?.message || err);
-          failures.push({ index: indices[index], message: err?.message || "Generation failed" });
-          if (err?.status === 400 || err?.status === 401 || err?.status === 403 || err?.status === 429) {
-            fatalError = err;
-            return;
+    const stickers: any[] = [];
+    const failures: Array<{ index: number; message: string }> = [];
+
+    for (const poseIndex of indices) {
+      try {
+        stickers.push(await generateStickerWithOpenAI(source, STICKER_POSES[poseIndex], poseIndex, style));
+      } catch (error: any) {
+        console.error(`Sticker ${poseIndex + 1} failed:`, error?.message || error);
+        failures.push({ index: poseIndex, message: error?.message || "Generation failed" });
+        if ([400, 401, 403, 429, 503].includes(error?.status)) {
+          const status = error?.status === 429 ? 429 : error?.status === 503 ? 503 : 502;
+          if (!stickers.length) {
+            return res.status(status).json({
+              error: error?.status === 429
+                ? "OpenAI API đang chạm rate limit/quota của tài khoản. Hãy thử lại sau hoặc kiểm tra Billing/Limits."
+                : error?.message || "OpenAI Image API từ chối yêu cầu.",
+              code: error?.status === 429 ? "OPENAI_RATE_LIMIT" : "OPENAI_PROVIDER_ERROR",
+              stickers,
+              failures,
+              remaining: indices.filter((i) => i >= poseIndex),
+            });
           }
+          break;
         }
       }
-    };
-    // Start with one request at a time: safer for free-tier capacity and prevents
-    // multiple wasted generations when the provider rejects a model/account.
-    await worker();
-
-    const stickers = results.filter(Boolean);
-    const quota = fatalError?.status === 429;
-    const message = quota ? "Hugging Face đã hết quota GPU. Các ảnh đã tạo được giữ lại. Bạn có thể tiếp tục phần còn thiếu khi tài khoản có quota. HF chưa cung cấp thời gian khôi phục đáng tin cậy." : fatalError?.message;
-    if (!stickers.length) {
-      return res.status(quota ? 429 : 502).json({ error: message || failures[0]?.message || "Provider không trả ảnh.", code: quota ? "HF_QUOTA_EXCEEDED" : "PROVIDER_ERROR", stickers: [], failures, remaining: indices });
     }
 
-    res.json({ success: true, stickers, requested: poses.length, generated: stickers.length, failures, warning: message, code: quota ? "HF_QUOTA_EXCEEDED" : undefined, remaining: indices.filter((_, i) => !results[i]) });
+    const completed = new Set(stickers.map((sticker) => Number(String(sticker.id).replace("sticker_", "")) - 1));
+    const remaining = indices.filter((i) => !completed.has(i));
+
+    res.json({
+      success: true,
+      stickers,
+      requested: indices.length,
+      generated: stickers.length,
+      failures,
+      remaining,
+      warning: remaining.length ? "Đã giữ các ảnh tạo thành công. Bạn có thể tiếp tục phần còn thiếu." : undefined,
+    });
   } catch (error: any) {
     console.error("Error in /api/generate-stickers:", error);
-    res.status(500).json({ error: error?.message || "Failed to generate stickers" });
+    res.status(error?.status || 500).json({ error: error?.message || "Failed to generate stickers" });
   }
 });
 
 async function startServer() {
-  try {
-    const saved = parseEnv(await fs.readFile(HF_TOKEN_FILE, "utf8")).HF_TOKEN?.trim();
-    if (saved && /^hf_[A-Za-z0-9_-]+$/.test(saved)) { process.env.HF_TOKEN = saved; tokenSource = "saved-file"; }
-  } catch (error: any) { if (error.code !== "ENOENT") console.warn("Không đọc được file token; sử dụng cấu hình môi trường."); }
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({ server: { middlewareMode: true }, appType: "spa" });
     app.use(vite.middlewares);
